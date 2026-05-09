@@ -17,23 +17,36 @@
 
 ```
 AgenteIA/
-├── package.json              # Configuração do npm + scripts
-├── tsconfig.json             # Configuração do TypeScript
-├── .gitignore                # Arquivos ignorados pelo Git
+├── package.json                # Configuração do npm + scripts
+├── tsconfig.json               # Configuração do TypeScript
+├── .gitignore                  # Arquivos ignorados pelo Git
+├── DOCUMENTACAO_PROJETO.md     # Esta documentação
 ├── src/
 │   ├── cli/
-│   │   ├── index.ts          # Entrypoint da CLI + parser de argumentos
-│   │   └── commands.ts       # Roteamento e implementação dos comandos
+│   │   ├── index.ts            # Entrypoint da CLI + parser de argumentos
+│   │   └── commands.ts         # Roteamento e implementação dos comandos (DIP)
 │   ├── core/
-│   │   ├── index.ts          # Re-exports públicos do módulo core
-│   │   ├── FileReader.ts     # Abstração do sistema de arquivos
-│   │   ├── CommandExecutor.ts # Execução segura de comandos shell
-│   │   ├── ToolRegistry.ts   # Registro de tools com JSON Schema + handlers
-│   │   └── RAGManager.ts     # Retrieval-Augmented Generation (embeddings + busca semântica)
-│   └── providers/
-│       ├── index.ts          # Re-exports públicos do módulo providers
-│       ├── types.ts          # Interfaces: ChatRequest, ChatResponse, EmbedRequest, EmbedResponse, IProvider
-│       └── OllamaProvider.ts # Cliente HTTP para Ollama (chat + embeddings)
+│   │   ├── index.ts            # Re-exports públicos do módulo core
+│   │   ├── FileReader.ts       # Abstração do sistema de arquivos
+│   │   ├── CommandExecutor.ts  # Execução segura de comandos shell
+│   │   ├── ToolRegistry.ts     # Registro de tools com JSON Schema + handlers
+│   │   ├── AppContext.ts       # Container DI com todas as dependências (DIP)
+│   │   ├── ProviderFactory.ts  # Factory para criar providers (OCP)
+│   │   └── rag/
+│   │       ├── index.ts        # Re-exports do módulo RAG
+│   │       ├── Chunker.ts      # Divisão de texto em chunks (SRP)
+│   │       ├── Embedder.ts     # Geração de embeddings (SRP)
+│   │       ├── VectorStore.ts  # Cache de embeddings em disco (SRP)
+│   │       ├── Retriever.ts    # Busca por similaridade (SRP)
+│   │       ├── RAGManager.ts   # Orquestrador do pipeline RAG
+│   │       ├── PromptBuilder.ts# Montagem de prompt com contexto (SRP)
+│   │       └── ReActLoop.ts    # Loop Reasoning + Acting (Strategy)
+│   ├── providers/
+│   │   ├── index.ts            # Re-exports públicos do módulo providers
+│   │   ├── types.ts            # Interfaces: IProvider, IEmbedProvider, ChatRequest, etc.
+│   │   └── OllamaProvider.ts   # Cliente HTTP para Ollama (chat + embeddings)
+│   └── validation/
+│       └── JsonValidator.ts    # Validador JSON puro (SRP, zero dependências)
 ```
 
 ---

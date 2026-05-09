@@ -25,9 +25,35 @@ export interface EmbedResponse {
   embeddings: number[][];
 }
 
+/**
+ * IProvider: Contrato base para provedores de linguagem.
+ * 
+ * LSP (Liskov Substitution): Qualquer classe que implemente IProvider
+ * pode ser usada no lugar de OllamaProvider sem quebrar o sistema.
+ * 
+ * O método embed() é opcional na interface base (para providers
+ * que não suportam embeddings, como APIs de chat puro).
+ */
 export interface IProvider {
   /** Nome do provider para logging */
   readonly name: string;
   /** Envia um prompt e recebe a resposta do modelo */
   chat(request: ChatRequest): Promise<ChatResponse>;
+  /**
+   * Gera embedding vetorial para um texto.
+   * Opcional por padrão — providers que não suportam embedding
+   * podem deixar sem implementação.
+   */
+  embed?(text: string, embedModel?: string, keepAlive?: string): Promise<number[]>;
+}
+
+/**
+ * IEmbedProvider: Extensão de IProvider para provedores que
+ * suportam embeddings (RAG, busca semântica, etc.).
+ * 
+ * Ao contrário de IProvider.embed() que é opcional, esta interface
+ * garante que o método existe em tempo de compilação.
+ */
+export interface IEmbedProvider extends IProvider {
+  embed(text: string, embedModel?: string, keepAlive?: string): Promise<number[]>;
 }
