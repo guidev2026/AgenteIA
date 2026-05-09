@@ -7,6 +7,8 @@ export interface ChatRequest {
   temperature?: number;
   /** Máximo de tokens na resposta */
   max_tokens?: number;
+  /** Força o modelo a responder em JSON estrito (ativa format: 'json' no Ollama) */
+  format?: 'json';
 }
 
 export interface ChatResponse {
