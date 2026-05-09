@@ -331,3 +331,163 @@ describe('ReActLoop.execute() — JSON Mode (tool_call/final_response)', () => {
     expect(result.finalAnswer).toContain('não conseguiu');
   });
 });
+
+describe('ReActLoop.execute() — Com Reflector (self-correction)', () => {
+  let provider: IProvider;
+  let reflector: any;
+
+  it('text mode + reflect=true + resposta correta → sem correção', async () => {
+    provider = createMockProvider(['FINAL_ANSWER: resposta boa']);
+    reflector = {
+      reflect: vi.fn().mockResolvedValue({
+        finalContent: 'resposta boa',
+        wasCorrected: false,
+        errors: [],
+      }),
+    };
+    const loop = new ReActLoop(provider, createMockExecutor(), undefined, reflector);
+
+    const result = await loop.execute(
+      'teste',
+      [{ role: 'user', content: 'teste' }],
+      'phi3:3b',
+      { reflect: true }
+    );
+
+    expect(result.finalAnswer).toBe('resposta boa');
+    expect(result.wasCorrected).toBe(false);
+    expect(reflector.reflect).toHaveBeenCalledTimes(1);
+    expect(reflector.reflect).toHaveBeenCalledWith('FINAL_ANSWER: resposta boa', 'phi3:3b');
+  });
+
+  it('text mode + reflect=true + resposta incorreta → aplica correção', async () => {
+    provider = createMockProvider(['FINAL_ANSWER: resposta errada']);
+    reflector = {
+      reflect: vi.fn().mockResolvedValue({
+        finalContent: 'resposta corrigida',
+        wasCorrected: true,
+        errors: [{ type: 'hallucination', description: 'informação errada' }],
+      }),
+    };
+    const loop = new ReActLoop(provider, createMockExecutor(), undefined, reflector);
+
+    const result = await loop.execute(
+      'teste',
+      [{ role: 'user', content: 'teste' }],
+      'phi3:3b',
+      { reflect: true }
+    );
+
+    expect(result.finalAnswer).toBe('resposta corrigida');
+    expect(result.wasCorrected).toBe(true);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors![0].type).toBe('hallucination');
+  });
+
+  it('text mode + reflect=false → não chama Reflector mesmo se injetado', async () => {
+    provider = createMockProvider(['FINAL_ANSWER: resposta']);
+    reflector = {
+      reflect: vi.fn().mockResolvedValue({
+        finalContent: 'resposta refletida',
+        wasCorrected: false,
+        errors: [],
+      }),
+    };
+    const loop = new ReActLoop(provider, createMockExecutor(), undefined, reflector);
+
+    const result = await loop.execute(
+      'teste',
+      [{ role: 'user', content: 'teste' }],
+      'phi3:3b',
+      { reflect: false }
+    );
+
+    expect(result.finalAnswer).toBe('FINAL_ANSWER: resposta');
+    expect(reflector.reflect).not.toHaveBeenCalled();
+  });
+
+  it('JSON mode + reflect=true → reflete após final_response', async () => {
+    const toolRegistry = createMockToolRegistry();
+    provider = createMockProvider(['{"final_response": "resposta json"}']);
+    reflector = {
+      reflect: vi.fn().mockResolvedValue({
+        finalContent: 'resposta json',
+        wasCorrected: false,
+        errors: [],
+      }),
+    };
+    const loop = new ReActLoop(provider, undefined, toolRegistry, reflector);
+
+    const result = await loop.execute(
+      'teste',
+      [{ role: 'user', content: 'teste' }],
+      'phi3:3b',
+      { jsonMode: true, reflect: true }
+    );
+
+    expect(result.finalAnswer).toBe('resposta json');
+    expect(result.wasCorrected).toBe(false);
+    expect(reflector.reflect).toHaveBeenCalledWith('resposta json', 'phi3:3b');
+  });
+
+  it('JSON mode + reflect=true + correção → aplica', async () => {
+    const toolRegistry = createMockToolRegistry();
+    provider = createMockProvider(['{"final_response": "resposta errada"}']);
+    reflector = {
+      reflect: vi.fn().mockResolvedValue({
+        finalContent: 'resposta corrigida pelo refletor',
+        wasCorrected: true,
+        errors: [{ type: 'logic', description: 'contradição' }],
+      }),
+    };
+    const loop = new ReActLoop(provider, undefined, toolRegistry, reflector);
+
+    const result = await loop.execute(
+      'teste',
+      [{ role: 'user', content: 'teste' }],
+      'phi3:3b',
+      { jsonMode: true, reflect: true }
+    );
+
+    expect(result.finalAnswer).toBe('resposta corrigida pelo refletor');
+    expect(result.wasCorrected).toBe(true);
+    expect(result.errors![0].type).toBe('logic');
+  });
+
+  it('reflect=true mas reflector não injetado → não quebra', async () => {
+    provider = createMockProvider(['FINAL_ANSWER: resposta']);
+    // Sem Reflector (undefined)
+    const loop = new ReActLoop(provider, createMockExecutor());
+
+    const result = await loop.execute(
+      'teste',
+      [{ role: 'user', content: 'teste' }],
+      'phi3:3b',
+      { reflect: true }
+    );
+
+    expect(result.finalAnswer).toBe('FINAL_ANSWER: resposta');
+    expect(result.wasCorrected).toBeUndefined();
+  });
+
+  it('reflect=true mas resposta vazia → Reflector é chamado (validação vazia dentro dele)', async () => {
+    provider = createMockProvider(['']);
+    reflector = {
+      reflect: vi.fn().mockResolvedValue({
+        finalContent: '',
+        wasCorrected: false,
+        errors: [],
+      }),
+    };
+    const loop = new ReActLoop(provider, createMockExecutor(), undefined, reflector);
+
+    const result = await loop.execute(
+      'teste',
+      [{ role: 'user', content: 'teste' }],
+      'phi3:3b',
+      { reflect: true }
+    );
+
+    expect(reflector.reflect).toHaveBeenCalled();
+  });
+});

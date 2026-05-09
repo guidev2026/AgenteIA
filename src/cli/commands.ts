@@ -26,6 +26,7 @@ import { StreamStrategy, ReActStrategy } from './strategies';
  *   --json     → ativa tool_call/final_response em JSON
  *   --stream   → ativa streaming SSE (efeito máquina de escrever)
  *   --no-think → desativa o indicador "pensando..." (útil para scripting)
+ *   --reflect  → ativa Reflector (auto-revisão) na resposta final
  */
 export interface CliArgs {
   command: string;
@@ -176,6 +177,7 @@ export async function runCommand(parsed: CliArgs): Promise<string> {
 
       const streamMode = parsed.flags.stream === true;
       const noThink = parsed.flags['no-think'] === true;
+      const reflectMode = parsed.flags.reflect === true;
 
       // Estratégia: decide qual pipeline executar
       // - streaming direto: quando --stream está ativo, --json NÃO está, e provider suporta
@@ -191,6 +193,7 @@ export async function runCommand(parsed: CliArgs): Promise<string> {
         prompt,
         streamMode,
         noThink,
+        reflectMode,
       });
     }
 

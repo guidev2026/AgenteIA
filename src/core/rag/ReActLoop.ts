@@ -14,6 +14,7 @@
 import type { IProvider } from '../../providers/types';
 import type { CommandExecutor } from '../CommandExecutor';
 import type { ToolRegistry } from '../ToolRegistry';
+import type { Reflector, ReflectionError } from '../Reflector';
 import { JsonValidator } from '../../validation/JsonValidator';
 import { PromptBuilder } from './PromptBuilder';
 import type { PromptConfig } from './PromptBuilder';
@@ -28,23 +29,30 @@ export interface ReActMessage {
 export interface ReActResult {
   finalAnswer: string;
   iterations: number;
+  /** Se a resposta passou pelo Reflector e foi corrigida */
+  wasCorrected?: boolean;
+  /** Erros encontrados pelo Reflector (vazio se não houve reflexão) */
+  errors?: ReflectionError[];
 }
 
 export class ReActLoop {
   private provider: IProvider;
   private executor?: CommandExecutor;
   private toolRegistry?: ToolRegistry;
+  private reflector?: Reflector;
   private jsonValidator: JsonValidator;
   private promptBuilder: PromptBuilder;
 
   constructor(
     provider: IProvider,
     executor?: CommandExecutor,
-    toolRegistry?: ToolRegistry
+    toolRegistry?: ToolRegistry,
+    reflector?: Reflector
   ) {
     this.provider = provider;
     this.executor = executor;
     this.toolRegistry = toolRegistry;
+    this.reflector = reflector;
     this.jsonValidator = new JsonValidator();
     this.promptBuilder = new PromptBuilder();
   }
@@ -242,26 +250,59 @@ export class ReActLoop {
   }
 
   /**
+   * Aplica o Reflector na resposta final, se disponível e solicitado.
+   */
+  private async applyReflection(
+    result: ReActResult,
+    model: string,
+    reflectFlag: boolean
+  ): Promise<ReActResult> {
+    // Só aplica reflexão se:
+    // 1. A flag --reflect está ativa
+    // 2. O Reflector foi injetado
+    // 3. Há uma resposta real (não vazia)
+    if (!reflectFlag || !this.reflector || !result.finalAnswer) {
+      return result;
+    }
+
+    const reflection = await this.reflector.reflect(result.finalAnswer, model);
+
+    return {
+      finalAnswer: reflection.finalContent,
+      iterations: result.iterations,
+      wasCorrected: reflection.wasCorrected,
+      errors: reflection.errors,
+    };
+  }
+
+  /**
    * Ponto de entrada: executa o loop ReAct no modo apropriado.
    *
    * @param systemPrompt Prompt de sistema
    * @param history Histórico de mensagens
    * @param model Modelo (default: tinyllama:1b)
    * @param options.jsonMode Se true, usa JSON mode (tool_call/final_response)
+   * @param options.reflect Se true, aplica Reflector pós-resposta (self-correction)
    * @returns Resultado com resposta final e número de iterações
    */
   async execute(
     systemPrompt: string,
     history: ReActMessage[],
     model?: string,
-    options?: { jsonMode?: boolean }
+    options?: { jsonMode?: boolean; reflect?: boolean }
   ): Promise<ReActResult> {
     const resolvedModel = model ?? 'tinyllama:1b';
+    const reflectFlag = options?.reflect === true;
+
+    let result: ReActResult;
 
     if (options?.jsonMode && this.toolRegistry) {
-      return this.executeJsonMode(systemPrompt, history, resolvedModel);
+      result = await this.executeJsonMode(systemPrompt, history, resolvedModel);
+    } else {
+      result = await this.executeTextMode(systemPrompt, history, resolvedModel);
     }
 
-    return this.executeTextMode(systemPrompt, history, resolvedModel);
+    // Aplica reflexão após a resposta final (ambos os modos)
+    return this.applyReflection(result, resolvedModel, reflectFlag);
   }
 }

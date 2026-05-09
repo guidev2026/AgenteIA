@@ -41,5 +41,9 @@ export type { ReActMessage, ReActResult } from './rag/ReActLoop';
 export { PromptBuilder } from './rag/PromptBuilder';
 export type { PromptConfig } from './rag/PromptBuilder';
 
+// Reflector (self-correction)
+export { Reflector } from './Reflector';
+export type { ReflectionError, ReflectionResult } from './Reflector';
+
 // Validação JSON
 export { JsonValidator, ValidationError } from '../validation/JsonValidator';

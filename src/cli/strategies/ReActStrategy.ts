@@ -13,11 +13,11 @@
 
 import type { ChatStrategy, ChatContext } from './ChatStrategy';
 import { buildSystemPrompt } from './ChatStrategy';
-import { ReActLoop, CommandExecutor } from '../../core';
+import { ReActLoop, CommandExecutor, Reflector } from '../../core';
 
 export class ReActStrategy implements ChatStrategy {
   async execute(ctx: ChatContext): Promise<string> {
-    const { app, prompt, streamMode, noThink } = ctx;
+    const { app, prompt, streamMode, noThink, reflectMode } = ctx;
     const {
       provider,
       model,
@@ -30,13 +30,24 @@ export class ReActStrategy implements ChatStrategy {
     // Constrói o system prompt completo (RAG + rules)
     const systemPrompt = await buildSystemPrompt(app, prompt, jsonMode, ragDir);
 
+    // Cria o Reflector (self-correction) se --reflect estiver ativo
+    const reflector = reflectMode
+      ? new Reflector(provider, toolRegistry)
+      : undefined;
+
+    // Indicador visual de reflexão (vai para stderr para não poluir stdout)
+    if (reflectMode && !noThink) {
+      console.error('🪞 Reflector ativo — respostas serão revisadas automaticamente');
+    }
+
     // Cria o ReActLoop com dependências injetadas
     // - jsonMode = true: usa toolRegistry (JSON tool calls)
     // - jsonMode = false: usa commandExecutor (texto ACTION/FINAL_ANSWER)
     const reactLoop = new ReActLoop(
       provider,
       jsonMode ? undefined : commandExecutor,
-      jsonMode ? toolRegistry : undefined
+      jsonMode ? toolRegistry : undefined,
+      reflector // injeta o Reflector (undefined se --reflect não ativo)
     );
 
     // Indicador visual de "pensamento" durante o ReAct

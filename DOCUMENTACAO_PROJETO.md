@@ -354,7 +354,95 @@ npm run dev -- chat "Explique o que é SOLID" --model llama3.2:3b
 
 ---
 
-## 🔧 Tópico 12 — Retrieval-Augmented Generation (RAG)
+## 🔧 Tópico 12 — Self-Correction / Reflection Layer (Reflector)
+
+### Visão Geral
+
+O **Reflector** (`src/core/Reflector.ts`) é uma camada opcional de auto-correção que entra em ação **após** a resposta final ser gerada pelo ReAct Loop. Ele submete a resposta a um sistema de crítica (segunda chamada ao mesmo modelo, com baixa temperatura e formato JSON), e retorna uma versão corrigida se problemas forem detectados.
+
+### Arquitetura
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                      ReActLoop                                │
+│                                                              │
+│  1. execute() → modo texto ou JSON                           │
+│  2. Obtém finalAnswer + iterations                           │
+│  3. Se --reflect=true → applyReflection()                    │
+│       └── Reflector.reflect(finalAnswer, model)              │
+│       └── Retorna ReflectionResult                           │
+│  4. ReActLoop mescla resultado no ReActResult                │
+│                                                              │
+│  Propriedades adicionais no resultado:                       │
+│  - wasCorrected: boolean                                     │
+│  - errors: ReflectionError[]                                 │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### Interface
+
+```typescript
+interface ReflectionError {
+  type: 'hallucination' | 'syntax' | 'inconsistency' | 'logic';
+  description: string;
+}
+
+interface ReflectionResult {
+  finalContent: string;      // Conteúdo corrigido (ou original)
+  wasCorrected: boolean;     // Se houve correção
+  errors: ReflectionError[]; // Erros encontrados (vazio se nenhum)
+}
+```
+
+### Prompt de Crítica (CRITICAL_SYSTEM_PROMPT)
+
+O sistema de crítica analisa 4 categorias de problemas:
+
+| Categoria | Detecta |
+|-----------|---------|
+| **Alucinações de API/Libraries** | Menções a bibliotecas que não existem (`import { x } from 'react-ghost'`), funções com nomes errados, módulos Node.js falsos |
+| **Erros de Sintaxe** | Blocos de código com syntax inválida, TypeScript com tipos errados |
+| **Inconsistências com Ferramentas** | Sugestões de ferramentas que não estão no ToolRegistry (`{TOOLS_LIST}`) |
+| **Contradições Lógicas** | Respostas que se contradizem internamente ou afirmam algo factualmente impossível |
+
+### Fluxo de Execução
+
+1. **Resposta é gerada** pelo ReAct Loop (texto ou JSON mode)
+2. **Reflector.reflect()** é chamado com `temperature: 0.1` e `format: 'json'`
+3. **Modelo retorna JSON** com `{ hasError, errors, correctedOutput }`
+4. **Reflector parseia** o JSON e decide:
+   - Se `hasError=true` e `correctedOutput` é válido → resposta corrigida
+   - Se `hasError=false` ou `correctedOutput` vazio → mantém resposta original
+5. **ReActLoop** mescla o resultado (incluindo `wasCorrected` e `errors`)
+
+### Mecanismos de Robustez
+
+| Mecanismo | Descrição |
+|-----------|-----------|
+| **Fallback silencioso** | Se o JSON de retorno for inválido, retorna resposta original |
+| **Flag `--reflect`** | Só ativa se explicitamente solicitado pelo usuário |
+| **String vazia** | Se `finalAnswer` for vazio, não perde tempo com crítica |
+| **Baixa temperatura** | `temperature: 0.1` → resposta mais determinística |
+| **Sem dependências** | Zero dependências externas — apenas `IProvider` injetado |
+
+### Exemplo de uso
+
+```bash
+# Chat com auto-correção ativada
+npm run dev -- chat "Explique SOLID" --reflect
+
+# ReAct + JSON + auto-correção
+npm run dev -- chat "Qual o conteúdo do package.json?" --json --reflect
+
+# Chat normal (sem reflexão)
+npm run dev -- chat "Explique SOLID"
+```
+
+> **Nota:** A reflexão dobra o número de chamadas ao modelo (1 para gerar + 1 para criticar). Em hardware de 12GB RAM, o overhead é de ~2-5 segundos adicionais por resposta. Recomendado para respostas importantes ou quando a precisão é crítica.
+
+---
+
+## 🔧 Tópico 13 — Retrieval-Augmented Generation (RAG)
 
 ### Visão Geral
 
@@ -457,14 +545,15 @@ A suíte de testes usa **Vitest** (v4.1.5) e está organizada em `tests/unit/`, 
 |--------|---------|--------|-------------|
 | **Core** | `tests/unit/core/ToolRegistry.test.ts` | 9 | Registro de tools, execução com/sem parâmetros, validação de existência |
 | **Core** | `tests/unit/core/CommandExecutor.test.ts` | 3 | Execução de comandos, captura stderr, erro de spawn |
+| **Core** | `tests/unit/core/Reflector.test.ts` | 10 | Instanciação, resposta correta (sem correção), resposta incorreta (com correção), resposta vazia/só espaços, JSON inválido, múltiplos erros, integração com toolRegistry, fallback de rede |
 | **Providers** | `tests/unit/providers/OllamaProvider.test.ts` | 17 | Chat com parâmetros, format=json, erro HTTP, embed. **Streaming:** tokens individuais, body com stream:true, erro HTTP no stream, linhas vazias/não-JSON, chunks TCP quebrados |
 | **RAG** | `tests/unit/rag/Retriever.test.ts` | 13 | Cosine similarity, rankeamento, ordenação, busca vazia |
-| **RAG** | `tests/unit/rag/ReActLoop.test.ts` | 14 | **Text Mode:** ACTION/FINAL_ANSWER, limite 5 iterações, erro em ACTION, build de prompt, modelo padrão. **JSON Mode:** final_response direta, tool_call → ferramenta → final_response, detecção de loop repetido, fallback text mode, resposta não-JSON, formato desconhecido, erro em ferramenta, esgotamento de iterações |
+| **RAG** | `tests/unit/rag/ReActLoop.test.ts` | 21 | **Text Mode:** ACTION/FINAL_ANSWER, limite 5 iterações, erro em ACTION, build de prompt, modelo padrão. **JSON Mode:** final_response direta, tool_call → ferramenta → final_response, detecção de loop repetido, fallback text mode, resposta não-JSON, formato desconhecido, erro em ferramenta, esgotamento de iterações. **Reflector:** text/json mode com reflect, correção, reflect=false, reflector não injetado, resposta vazia |
 | **RAG** | `tests/unit/rag/Chunker.test.ts` | 8 | Chunking por parágrafo, sentença, overlap, limite de chunks |
 | **Validation** | `tests/unit/validation/JsonValidator.test.ts` | 13 | validate(), tryValidate(), ValidationError |
 | **CLI** | `tests/unit/cli/commands.test.ts` | 15 | Comandos read/dir/search/exec/chat, flags --stream/--json/--no-think, fallback streaming direto, erro de comando faltando |
 
-**Total: 92 testes, todos passando.**
+**Total: 106 testes, todos passando.**
 
 ### Estratégia de Mocks (zero I/O real)
 
@@ -511,10 +600,11 @@ npx vitest            # Modo watch (recarrega automático)
 - Zero dependências externas em produção (apenas `node:http`, `node:fs/promises`, `node:child_process`)
 - TypeScript configurado com strict mode
 - ✅ **SOLID implementado** — SRP (classes coesas), OCP (ProviderFactory), LSP (IProvider), ISP (interfaces enxutas), DIP (AppContext + injeção de dependências)
-- ✅ **92 testes unitários** passando com Vitest (8 arquivos: ToolRegistry, CommandExecutor, OllamaProvider, Retriever, ReActLoop, Chunker, JsonValidator, commands)
+- ✅ **106 testes unitários** passando com Vitest (9 arquivos: ToolRegistry, CommandExecutor, Reflector, OllamaProvider, Retriever, ReActLoop, Chunker, JsonValidator, commands)
 
 📝 **Possíveis próximos passos (não implementados):**
 - [já implementado] ~~Adicionar streaming de respostas do Ollama (SSE)~~
+- [já implementado] ~~Adicionar camada de auto-correção (Reflector + --reflect)~~
 - Implementar novos providers (OpenAI, Anthropic, etc.)
 - Adicionar suporte a sessões/conversa com histórico (multi-turn)
 - Expandir ToolRegistry com mais ferramentas (writeFile, searchFiles, etc.)

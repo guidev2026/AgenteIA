@@ -121,6 +121,8 @@ Chat Flags:
   --ollama-port <port>            Porta do Ollama (padrão: 11434)
   --json                          Ativa ReAct Loop + JSON estrito (Function Calling)
   --rag <dir>                     Ativa RAG (Retrieval-Augmented Generation) com indexação do diretório
+  --reflect                       Ativa auto-revisão (Reflector) da resposta final
+  --no-think                      Desativa o indicador "pensando..." (útil para scripting)
 
 ReAct Loop (com --json):
   O modelo tem acesso às ferramentas: readFile, readDir, execute.

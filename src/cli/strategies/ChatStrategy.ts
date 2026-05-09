@@ -18,6 +18,8 @@ export interface ChatContext {
   prompt: string;
   streamMode: boolean;
   noThink: boolean;
+  /** Se true, aplica Reflector (self-correction) pós-resposta */
+  reflectMode: boolean;
 }
 
 /** Interface base para todas as estratégias de chat */
