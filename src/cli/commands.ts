@@ -11,7 +11,7 @@
  *       Tudo é injetado via AppContext → ProviderFactory → interfaces.
  */
 
-import { AppContext, RAGManager, FileReader } from '../core';
+import { AppContext, RAGManager, FileReader, ReActLoop } from '../core';
 import type { IEmbedProvider } from '../providers/types';
 
 /**
@@ -146,10 +146,10 @@ export async function runCommand(parsed: CliArgs): Promise<string> {
     /**
      * Comando: chat <prompt>
      *
-     * Pipeline com ReAct Loop (Reasoning + Acting) quando --json está ativo.
+     * Pipeline com ReAct Loop (Reasoning + Acting) — delega para ReActLoop.ts.
      *
      * ┌──────────────┐
-     * │ 1. args.join  │  prompt
+     * │ 1. args.join  │  prompt + RAG context → systemPrompt
      * └──────┬───────┘
      *        │
      * ┌──────▼───────────────────────────────────────────┐
@@ -158,20 +158,14 @@ export async function runCommand(parsed: CliArgs): Promise<string> {
      * └──────┬───────────────────────────────────────────┘
      *        │
      * ┌──────▼───────────────────────────────────────────┐
-     * │ 3. System Prompt + RAG context (se --rag)         │
+     * │ 3. ReActLoop.execute(systemPrompt, [], model,     │
+     * │      { jsonMode })                                │
+     * │    │── JSON mode: tool_call / final_response      │
+     * │    └── Text mode: ACTION / FINAL_ANSWER           │
      * └──────┬───────────────────────────────────────────┘
      *        │
-     * ┌──────▼───────┐     ┌─────────────────────────┐
-     * │ 4. ReAct     │────▶│ provider.chat(prompt)    │──▶ Ollama /api/generate
-     * │    Loop      │     │ format: 'json' se --json │
-     * │ (max 5 iter) │◀────│ response (JSON parseado) │
-     * └──────┬───────┘     └─────────────────────────┘
-     *        │
-     *        │  parsed.tool_call?
-     *        ├── SIM ──▶ toolRegistry.execute(name, args) → resultado → continua
-     *        │
-     *        │  parsed.final_response?
-     *        └── SIM ──▶ quebra loop → exibe final_response
+     *        ▼
+     *   finalAnswer
      *
      * Exemplo: soberano chat "Qual o conteúdo do package.json?" --json
      */
@@ -184,6 +178,7 @@ export async function runCommand(parsed: CliArgs): Promise<string> {
       const {
         provider,
         toolRegistry,
+        commandExecutor,
         model,
         jsonMode,
         ragDir,
@@ -248,7 +243,7 @@ export async function runCommand(parsed: CliArgs): Promise<string> {
         );
       }
 
-      // Se --json estiver ativo, usa Grammar Restraint com formato JSON
+      // Se --json estiver ativo, usa formato tool_call / final_response
       if (jsonMode) {
         systemPromptParts.push(
           '',
@@ -267,90 +262,21 @@ export async function runCommand(parsed: CliArgs): Promise<string> {
 
       const systemPrompt = systemPromptParts.join('\n');
 
-      // ── ReAct Loop ──
-      const MAX_ITERATIONS = 5;
-      let accumulatedPrompt = systemPrompt;
-      let lastToolCall = '';
-
-      for (let i = 0; i < MAX_ITERATIONS; i++) {
-        // Se for a última iteração, força o modelo a sintetizar resposta final
-        const promptForThisIteration =
-          i === MAX_ITERATIONS - 1
-            ? accumulatedPrompt +
-              '\n\nATENÇÃO: Esta é sua ÚLTIMA iteração. Você JÁ possui todos os ' +
-              'dados necessários. Responda APENAS com ' +
-              '{"final_response": "<sua resposta baseada nos dados coletados>"}. ' +
-              'NÃO chame mais ferramentas.'
-            : accumulatedPrompt;
-
-        // Envia prompt ao modelo
-        const response = await provider.chat({
-          model,
-          prompt: promptForThisIteration,
-          temperature: 0.2,
-          // Só ativa format: 'json' se --json foi passado
-          ...(jsonMode ? { format: 'json' as const } : {}),
-        });
-
-        const content = response.response.trim();
-
-        // Se não está em modo JSON, retorna a resposta crua
-        if (!jsonMode) {
-          return `[${response.model}]\n${content}`;
-        }
-
-        // Parse do JSON da resposta
-        let parsed: Record<string, unknown>;
-        try {
-          parsed = JSON.parse(content);
-        } catch {
-          // Fallback: se não for JSON, retorna cru
-          return `[${response.model}]\n${content}`;
-        }
-
-        // Cenário A: tool call → executa e continua o loop
-        if (parsed.tool_call && typeof parsed.tool_call === 'string') {
-          const toolName = parsed.tool_call;
-          const toolArgs = (parsed.args as Record<string, unknown>) || {};
-          const callFingerprint = `${toolName}:${JSON.stringify(toolArgs)}`;
-
-          // Detecta chamadas repetidas consecutivas (loop infinito)
-          if (callFingerprint === lastToolCall && i < MAX_ITERATIONS - 1) {
-            accumulatedPrompt +=
-              `\n\nATENÇÃO: Você já chamou "${toolName}" com os mesmos ` +
-              'argumentos. Use os dados já recebidos e responda com ' +
-              '{"final_response": "<resposta>"}.';
-            lastToolCall = '';
-            continue;
-          }
-
-          lastToolCall = callFingerprint;
-
-          let toolResult: string;
-          try {
-            toolResult = await toolRegistry.execute(toolName, toolArgs);
-          } catch (err: unknown) {
-            toolResult = err instanceof Error ? err.message : String(err);
-          }
-
-          accumulatedPrompt += `\n\nResultado da ferramenta ${toolName}: ${toolResult}`;
-          continue;
-        }
-
-        // Cenário B: resposta final → exibe e encerra
-        if (parsed.final_response && typeof parsed.final_response === 'string') {
-          return `[${response.model}]\n${parsed.final_response}`;
-        }
-
-        // Cenário C: formato desconhecido → fallback
-        return `[${response.model}]\n${content}`;
-      }
-
-      // Loop esgotado sem resposta final
-      throw new Error(
-        `ReAct loop exhausted (${MAX_ITERATIONS} iterations) without final_response. ` +
-        `Last prompt length: ${accumulatedPrompt.length} chars.`
+      // ── Delega para ReActLoop (SIM, com CommandExecutor e ToolRegistry) ──
+      const reactLoop = new ReActLoop(
+        provider,
+        jsonMode ? undefined : commandExecutor, // text mode precisa do executor
+        jsonMode ? toolRegistry : undefined     // json mode precisa do registry
       );
+
+      const result = await reactLoop.execute(
+        systemPrompt,
+        [], // histórico vazio (tudo já está no systemPrompt)
+        model,
+        { jsonMode }
+      );
+
+      return `[${model}]\n${result.finalAnswer}`;
     }
 
     /** Fallback: comando não reconhecido */

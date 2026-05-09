@@ -4,8 +4,8 @@
  * Responsabilidade Única: Gerenciar o loop de interação ReAct:
  * 1. Concatena histórico de mensagens em um prompt único
  * 2. Envia para o provider e interpreta ações vs resposta final
- * 3. Se conter ACTION, executa via CommandExecutor e realimenta o prompt
- * 4. Se conter FINAL_ANSWER, retorna
+ * 3. Se for JSON mode (--json), usa ToolRegistry + formato tool_call/final_response
+ * 4. Se for modo texto, usa ACTION/FINAL_ANSWER + CommandExecutor
  *
  * Compatível com IProvider.chat(request: ChatRequest): ChatResponse
  * (prompt único, não array de mensagens — formata tudo inline)
@@ -13,8 +13,12 @@
 
 import type { IProvider } from '../../providers/types';
 import type { CommandExecutor } from '../CommandExecutor';
+import type { ToolRegistry } from '../ToolRegistry';
+import { JsonValidator } from '../../validation/JsonValidator';
+import { PromptBuilder } from './PromptBuilder';
+import type { PromptConfig } from './PromptBuilder';
 
-const MAX_ITERATIONS = 10;
+const MAX_ITERATIONS = 5;
 
 export interface ReActMessage {
   role: 'user' | 'assistant' | 'system';
@@ -28,14 +32,21 @@ export interface ReActResult {
 
 export class ReActLoop {
   private provider: IProvider;
-  private executor: CommandExecutor;
+  private executor?: CommandExecutor;
+  private toolRegistry?: ToolRegistry;
+  private jsonValidator: JsonValidator;
+  private promptBuilder: PromptBuilder;
 
   constructor(
     provider: IProvider,
-    executor: CommandExecutor
+    executor?: CommandExecutor,
+    toolRegistry?: ToolRegistry
   ) {
     this.provider = provider;
     this.executor = executor;
+    this.toolRegistry = toolRegistry;
+    this.jsonValidator = new JsonValidator();
+    this.promptBuilder = new PromptBuilder();
   }
 
   /**
@@ -66,49 +77,130 @@ export class ReActLoop {
   }
 
   /**
-   * Executa o loop ReAct até encontrar FINAL_ANSWER
-   * ou atingir o limite de iterações.
-   *
-   * @param systemPrompt Prompt de sistema injetado automaticamente
-   * @param history Histórico de mensagens da conversa
-   * @param model Modelo a ser usado (opcional)
-   * @returns Resultado com resposta final e número de iterações
+   * Executa o loop ReAct no modo JSON (tool_call / final_response).
+   * Usado quando --json está ativo. Usa ToolRegistry + detecção de loop.
    */
-  async execute(
+  private async executeJsonMode(
     systemPrompt: string,
     history: ReActMessage[],
-    model?: string
+    model: string
+  ): Promise<ReActResult> {
+    let accumulatedPrompt = this.buildPrompt(systemPrompt, history);
+    let lastToolCall = '';
+
+    for (let i = 0; i < MAX_ITERATIONS; i++) {
+      const promptForThisIteration =
+        i === MAX_ITERATIONS - 1
+          ? accumulatedPrompt +
+            '\n\nATENÇÃO: Esta é sua ÚLTIMA iteração. Você JÁ possui todos os ' +
+            'dados necessários. Responda APENAS com ' +
+            '{"final_response": "<sua resposta baseada nos dados coletados>"}. ' +
+            'NÃO chame mais ferramentas.'
+          : accumulatedPrompt;
+
+      const response = await this.provider.chat({
+        model,
+        prompt: promptForThisIteration,
+        temperature: 0.2,
+        format: 'json',
+      });
+
+      const content = response.response.trim();
+
+      // Usa JsonValidator para parsear
+      const parsed = this.jsonValidator.tryValidate<Record<string, unknown>>(content);
+      if (!parsed) {
+        // Se não for JSON, retorna cru como fallback
+        return {
+          finalAnswer: content,
+          iterations: i + 1,
+        };
+      }
+
+      // tool_call → executa e continua
+      if (parsed.tool_call && typeof parsed.tool_call === 'string' && this.toolRegistry) {
+        const toolName = parsed.tool_call;
+        const toolArgs = (parsed.args as Record<string, unknown>) || {};
+        const callFingerprint = `${toolName}:${JSON.stringify(toolArgs)}`;
+
+        // Detecta chamadas repetidas consecutivas (loop infinito)
+        if (callFingerprint === lastToolCall && i < MAX_ITERATIONS - 1) {
+          accumulatedPrompt +=
+            `\n\nATENÇÃO: Você já chamou "${toolName}" com os mesmos ` +
+            'argumentos. Use os dados já recebidos e responda com ' +
+            '{"final_response": "<resposta>"}.';
+          lastToolCall = '';
+          continue;
+        }
+
+        lastToolCall = callFingerprint;
+
+        let toolResult: string;
+        try {
+          toolResult = await this.toolRegistry.execute(toolName, toolArgs);
+        } catch (err: unknown) {
+          toolResult = err instanceof Error ? err.message : String(err);
+        }
+
+        accumulatedPrompt += `\n\nResultado da ferramenta ${toolName}: ${toolResult}`;
+        continue;
+      }
+
+      // final_response → retorna
+      if (parsed.final_response && typeof parsed.final_response === 'string') {
+        return {
+          finalAnswer: parsed.final_response,
+          iterations: i + 1,
+        };
+      }
+
+      // Formato desconhecido → fallback
+      return {
+        finalAnswer: content,
+        iterations: i + 1,
+      };
+    }
+
+    // Loop esgotado
+    return {
+      finalAnswer: 'O modelo não conseguiu chegar a uma resposta final após ' +
+        `${MAX_ITERATIONS} iterações.`,
+      iterations: MAX_ITERATIONS,
+    };
+  }
+
+  /**
+   * Executa o loop ReAct no modo texto (ACTION / FINAL_ANSWER).
+   * Formato legado, sem JSON.
+   */
+  private async executeTextMode(
+    systemPrompt: string,
+    history: ReActMessage[],
+    model: string
   ): Promise<ReActResult> {
     let iteration = 0;
     let finalAnswer = '';
-
-    // Concatena todo o contexto em um prompt único
     let prompt = this.buildPrompt(systemPrompt, history);
 
     while (iteration < MAX_ITERATIONS) {
       iteration++;
 
-      // 1. Envia prompt para o modelo
       const response = await this.provider.chat({
-        model: model ?? 'tinyllama:1b',
+        model,
         prompt,
-        temperature: 0.3, // mais baixa para respostas mais determinísticas no ReAct
+        temperature: 0.3,
       });
       const content = response.response.trim();
 
-      // 2. Verifica se é resposta final
       if (content.includes('FINAL_ANSWER') || content.includes('FINAL ANSWER')) {
         finalAnswer = content;
         break;
       }
 
-      // 3. Se contém ACTION, tenta executar
-      if (content.includes('ACTION') || content.includes('ACTION:')) {
-        // Extrai o comando após ACTION:
+      if (this.executor && (content.includes('ACTION') || content.includes('ACTION:'))) {
         const actionMatch = content.match(/ACTION:?\s*(.+)/s);
         if (actionMatch) {
           const action = actionMatch[1].trim();
-          // Separa comando dos argumentos (split por espaço)
           const parts = action.split(/\s+/);
           const cmd = parts[0];
           const args = parts.slice(1);
@@ -119,8 +211,6 @@ export class ReActLoop {
               `OBSERVATION: Exit code ${result.exitCode}\n` +
               (result.stdout ? `STDOUT:\n${result.stdout}\n` : '') +
               (result.stderr ? `STDERR:\n${result.stderr}\n` : '');
-
-            // Alimenta o prompt com o resultado da ação
             prompt += `\n\n[ASSISTANT]: ${content}\n[SYSTEM]: ${observation}`;
           } catch (err) {
             const errMsg = err instanceof Error ? err.message : String(err);
@@ -130,11 +220,8 @@ export class ReActLoop {
         }
       }
 
-      // 4. Se não identificou nem ACTION nem FINAL_ANSWER,
-      //    assume que é pensamento contínuo — alimenta o prompt
       prompt += `\n\n[ASSISTANT]: ${content}`;
 
-      // Proteção: resposta muito curta pode indicar loop infinito
       if (content.length < 10 && iteration > 1) {
         finalAnswer = 'Resumo: ' + content;
         break;
@@ -142,7 +229,6 @@ export class ReActLoop {
     }
 
     if (!finalAnswer) {
-      // Fallback: retorna todo o conteúdo gerado como resposta
       const lastAssistant = prompt.match(/\[ASSISTANT\]:\s*(.+?)(?=\n\[|$)/s);
       finalAnswer = lastAssistant
         ? lastAssistant[1].trim()
@@ -153,5 +239,29 @@ export class ReActLoop {
       finalAnswer,
       iterations: iteration,
     };
+  }
+
+  /**
+   * Ponto de entrada: executa o loop ReAct no modo apropriado.
+   *
+   * @param systemPrompt Prompt de sistema
+   * @param history Histórico de mensagens
+   * @param model Modelo (default: tinyllama:1b)
+   * @param options.jsonMode Se true, usa JSON mode (tool_call/final_response)
+   * @returns Resultado com resposta final e número de iterações
+   */
+  async execute(
+    systemPrompt: string,
+    history: ReActMessage[],
+    model?: string,
+    options?: { jsonMode?: boolean }
+  ): Promise<ReActResult> {
+    const resolvedModel = model ?? 'tinyllama:1b';
+
+    if (options?.jsonMode && this.toolRegistry) {
+      return this.executeJsonMode(systemPrompt, history, resolvedModel);
+    }
+
+    return this.executeTextMode(systemPrompt, history, resolvedModel);
   }
 }

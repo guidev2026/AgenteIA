@@ -409,11 +409,11 @@ A suíte de testes usa **Vitest** (v4.1.5) e está organizada em `tests/unit/`, 
 | **Core** | `tests/unit/core/CommandExecutor.test.ts` | 3 | Execução de comandos, captura stderr, erro de spawn |
 | **Providers** | `tests/unit/providers/OllamaProvider.test.ts` | 7 | Chat com parâmetros, format=json (Grammar Restraint), erro HTTP, embed |
 | **RAG** | `tests/unit/rag/Retriever.test.ts` | 13 | Cosine similarity, rankeamento, ordenação, busca vazia |
-| **RAG** | `tests/unit/rag/ReActLoop.test.ts` | 6 | Ciclo ACTION/FINAL_ANSWER, limite de iterações, fallback |
+| **RAG** | `tests/unit/rag/ReActLoop.test.ts` | 14 | **Text Mode:** ACTION/FINAL_ANSWER, limite 5 iterações, erro em ACTION, build de prompt, modelo padrão. **JSON Mode:** final_response direta, tool_call → ferramenta → final_response, detecção de loop repetido, fallback text mode, resposta não-JSON, formato desconhecido, erro em ferramenta, esgotamento de iterações |
 | **RAG** | `tests/unit/rag/Chunker.test.ts` | 8 | Chunking por parágrafo, sentença, overlap, limite de chunks |
 | **Validation** | `tests/unit/validation/JsonValidator.test.ts` | 13 | validate(), tryValidate(), ValidationError |
 
-**Total: 59 testes, todos passando.**
+**Total: 67 testes, todos passando.**
 
 ### Estratégia de Mocks (zero I/O real)
 
@@ -421,7 +421,7 @@ A suíte de testes usa **Vitest** (v4.1.5) e está organizada em `tests/unit/`, 
 |----------------|---------|----------------|
 | `node:http` | `vi.mock('node:http', ...)` — intercepta `http.request()` | `OllamaProvider` |
 | `node:child_process` | `vi.mock('node:child_process', ...)` — intercepta `cp.spawn()` | `CommandExecutor` |
-| `IProvider` + `CommandExecutor` | Mock de interface inline com `vi.fn()` | `ReActLoop` |
+| `IProvider` + `CommandExecutor` + `ToolRegistry` | Mock de interface/classes reais injetadas no construtor com `vi.fn()` | `ReActLoop` |
 
 Nenhum teste faz chamadas reais ao Ollama, executa comandos shell reais ou acessa o sistema de arquivos além do necessário para importar módulos TypeScript. **Consumo de hardware: ~50MB RAM, 0% CPU para modelos.**
 
@@ -463,9 +463,10 @@ npx vitest            # Modo watch (recarrega automático)
 📝 **Possíveis próximos passos (não implementados):**
 - Adicionar streaming de respostas do Ollama (SSE)
 - Implementar novos providers (OpenAI, Anthropic, etc.)
-- Adicionar testes unitários com Vitest/Jest
 - Adicionar suporte a sessões/conversa com histórico (multi-turn)
 - Expandir ToolRegistry com mais ferramentas (writeFile, searchFiles, etc.)
 - Melhorar chunking com overlap adaptativo por estrutura (AST-aware)
 - Adicionar reranking multi-stage para melhorar precisão da busca
 - Suporte a PDF, DOCX e outros formatos no RAG
+- Abstrair módulos nativos (fs, child_process) por trás de interfaces (ISP/DIP) para testabilidade total
+- Adicionar testes de integração com Ollama real (opcional)

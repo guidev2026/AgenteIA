@@ -1,15 +1,22 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ReActLoop } from '../../../src/core/rag/ReActLoop';
 import { CommandExecutor } from '../../../src/core/CommandExecutor';
+import { ToolRegistry } from '../../../src/core/ToolRegistry';
 import type { IProvider } from '../../../src/providers/types';
 
 /**
  * Testes unitários para ReActLoop.
  *
- * Mock das dependências IProvider e CommandExecutor → zero requisições ao Ollama,
- * zero execução de comandos reais.
+ * Mock das dependências IProvider, CommandExecutor e ToolRegistry →
+ * zero requisições ao Ollama, zero execução de comandos reais, zero tool calls reais.
  * Zero consumo de CPU, zero I/O.
+ *
+ * Cobre ambos os modos:
+ * - Text mode (ACTION / FINAL_ANSWER) — legado, com CommandExecutor
+ * - JSON mode (tool_call / final_response) — novo, com ToolRegistry
  */
+
+// ── Helpers de mock ──
 
 function createMockProvider(responses: string[]): IProvider {
   let callIndex = 0;
@@ -35,18 +42,39 @@ function createMockExecutor(): CommandExecutor {
   } as unknown as CommandExecutor;
 }
 
-describe('ReActLoop.execute()', () => {
+function createMockToolRegistry(): ToolRegistry {
+  const registry = new ToolRegistry();
+  registry.register(
+    'readFile',
+    'Read a file',
+    { path: { type: 'string', description: 'file path' } },
+    vi.fn().mockResolvedValue('conteúdo mockado do arquivo')
+  );
+  registry.register(
+    'readDir',
+    'List directory',
+    { path: { type: 'string', description: 'directory path' } },
+    vi.fn().mockResolvedValue('dir1\ndir2')
+  );
+  return registry;
+}
+
+// ── Suite de testes ──
+
+describe('ReActLoop.execute() — Text Mode (ACTION/FINAL_ANSWER)', () => {
   let provider: IProvider;
   let executor: CommandExecutor;
   let loop: ReActLoop;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    provider = createMockProvider([]);
+    executor = createMockExecutor();
+    loop = new ReActLoop(provider, executor);
   });
 
   it('retorna FINAL_ANSWER na primeira iteração', async () => {
     provider = createMockProvider(['Aqui está a FINAL_ANSWER: 42']);
-    executor = createMockExecutor();
     loop = new ReActLoop(provider, executor);
 
     const result = await loop.execute(
@@ -58,18 +86,15 @@ describe('ReActLoop.execute()', () => {
     expect(result.finalAnswer).toContain('FINAL_ANSWER');
     expect(result.iterations).toBe(1);
     expect(provider.chat).toHaveBeenCalledTimes(1);
-    // Deve ter passado o model correto
     const callArgs = (provider.chat as any).mock.calls[0][0];
     expect(callArgs.model).toBe('phi3:3b');
   });
 
   it('executa ACTION e realimenta o prompt até FINAL_ANSWER', async () => {
-    // Primeira chamada: ACTION, segunda: FINAL_ANSWER
     provider = createMockProvider([
       'ACTION: ls -la',
       'FINAL_ANSWER: resultado obtido',
     ]);
-    executor = createMockExecutor();
     loop = new ReActLoop(provider, executor);
 
     const result = await loop.execute(
@@ -79,14 +104,11 @@ describe('ReActLoop.execute()', () => {
 
     expect(result.finalAnswer).toContain('FINAL_ANSWER');
     expect(result.iterations).toBe(2);
-    // O executor deve ter sido chamado com 'ls' e ['-la']
     expect(executor.execute).toHaveBeenCalledWith('ls', ['-la'], { timeout: 30000 });
   });
 
-  it('limita iterações a MAX_ITERATIONS sem FINAL_ANSWER', async () => {
-    // Provider nunca retorna FINAL_ANSWER — apenas respostas curtas
-    provider = createMockProvider(Array(15).fill('continuando...'));
-    executor = createMockExecutor();
+  it('limita iterações a MAX_ITERATIONS (5) sem FINAL_ANSWER', async () => {
+    provider = createMockProvider(Array(10).fill('continuando...'));
     loop = new ReActLoop(provider, executor);
 
     const result = await loop.execute(
@@ -94,9 +116,7 @@ describe('ReActLoop.execute()', () => {
       [{ role: 'user', content: 'teste' }]
     );
 
-    // Deve ter parado após 10 iterações (MAX_ITERATIONS)
-    expect(result.iterations).toBe(10);
-    // finalAnswer não deve estar vazio (fallback)
+    expect(result.iterations).toBe(5); // MAX_ITERATIONS real
     expect(result.finalAnswer.length).toBeGreaterThan(0);
   });
 
@@ -122,7 +142,6 @@ describe('ReActLoop.execute()', () => {
 
   it('constrói o prompt com system prompt e histórico', async () => {
     provider = createMockProvider(['FINAL_ANSWER: pronto']);
-    executor = createMockExecutor();
     loop = new ReActLoop(provider, executor);
 
     await loop.execute(
@@ -142,12 +161,173 @@ describe('ReActLoop.execute()', () => {
 
   it('usa tinyllama:1b como modelo padrão quando não especificado', async () => {
     provider = createMockProvider(['FINAL_ANSWER: ok']);
-    executor = createMockExecutor();
     loop = new ReActLoop(provider, executor);
 
     await loop.execute('teste', [{ role: 'user', content: 'teste' }]);
 
     const callArgs = (provider.chat as any).mock.calls[0][0];
     expect(callArgs.model).toBe('tinyllama:1b');
+  });
+});
+
+describe('ReActLoop.execute() — JSON Mode (tool_call/final_response)', () => {
+  let provider: IProvider;
+  let toolRegistry: ToolRegistry;
+  let loop: ReActLoop;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    toolRegistry = createMockToolRegistry();
+  });
+
+  it('final_response na primeira iteração retorna imediatamente', async () => {
+    provider = createMockProvider([
+      '{"final_response": "resposta direta"}',
+    ]);
+    loop = new ReActLoop(provider, undefined, toolRegistry);
+
+    const result = await loop.execute(
+      'Seja útil',
+      [{ role: 'user', content: 'pergunta' }],
+      'phi3:3b',
+      { jsonMode: true }
+    );
+
+    expect(result.finalAnswer).toBe('resposta direta');
+    expect(result.iterations).toBe(1);
+    expect(provider.chat).toHaveBeenCalledTimes(1);
+    // Deve ter passado format: 'json'
+    const callArgs = (provider.chat as any).mock.calls[0][0];
+    expect(callArgs.format).toBe('json');
+  });
+
+  it('tool_call → executa ferramenta → final_response', async () => {
+    provider = createMockProvider([
+      '{"tool_call": "readFile", "args": {"path": "test.txt"}}',
+      '{"final_response": "arquivo lido com sucesso"}',
+    ]);
+    loop = new ReActLoop(provider, undefined, toolRegistry);
+
+    const result = await loop.execute(
+      'Leia o arquivo',
+      [{ role: 'user', content: 'leia test.txt' }],
+      'phi3:3b',
+      { jsonMode: true }
+    );
+
+    expect(result.finalAnswer).toBe('arquivo lido com sucesso');
+    expect(result.iterations).toBe(2);
+    // ToolRegistry deve ter executado readFile
+    const executeSpy = (toolRegistry as any).tools.get('readFile').handler;
+    expect(executeSpy).toHaveBeenCalledWith({ path: 'test.txt' });
+  });
+
+  it('detecta tool_call repetido e força final_response', async () => {
+    // Mesma tool_call duas vezes consecutivas → detecta loop
+    provider = createMockProvider([
+      '{"tool_call": "readFile", "args": {"path": "x.txt"}}',
+      '{"tool_call": "readFile", "args": {"path": "x.txt"}}',
+      '{"final_response": "final após loop detectado"}',
+    ]);
+    loop = new ReActLoop(provider, undefined, toolRegistry);
+
+    const result = await loop.execute(
+      'teste',
+      [{ role: 'user', content: 'leia x.txt' }],
+      'phi3:3b',
+      { jsonMode: true }
+    );
+
+    expect(result.finalAnswer).toBe('final após loop detectado');
+    expect(result.iterations).toBe(3);
+  });
+
+  it('se jsonMode=true mas sem toolRegistry, usa text mode', async () => {
+    provider = createMockProvider(['FINAL_ANSWER: fallback']);
+    loop = new ReActLoop(provider, createMockExecutor());
+
+    const result = await loop.execute(
+      'teste',
+      [{ role: 'user', content: 'teste' }],
+      undefined,
+      { jsonMode: true }
+    );
+
+    expect(result.finalAnswer).toContain('FINAL_ANSWER');
+  });
+
+  it('resposta não-JSON em jsonMode retorna cru como fallback', async () => {
+    provider = createMockProvider(['texto puro sem JSON']);
+    loop = new ReActLoop(provider, undefined, toolRegistry);
+
+    const result = await loop.execute(
+      'teste',
+      [{ role: 'user', content: 'teste' }],
+      undefined,
+      { jsonMode: true }
+    );
+
+    expect(result.finalAnswer).toBe('texto puro sem JSON');
+    expect(result.iterations).toBe(1);
+  });
+
+  it('formato desconhecido (tool_call sem final_response) retorna fallback', async () => {
+    provider = createMockProvider(['{"algo": "estranho"}']);
+    loop = new ReActLoop(provider, undefined, toolRegistry);
+
+    const result = await loop.execute(
+      'teste',
+      [{ role: 'user', content: 'teste' }],
+      undefined,
+      { jsonMode: true }
+    );
+
+    // Fallback retorna o conteúdo cru
+    expect(result.finalAnswer).toContain('algo');
+    expect(result.iterations).toBe(1);
+  });
+
+  it('trata erro na execução da ferramenta e continua', async () => {
+    const failingRegistry = new ToolRegistry();
+    failingRegistry.register(
+      'failingTool',
+      'A tool that fails',
+      { input: { type: 'string', description: 'input' } },
+      vi.fn().mockRejectedValue(new Error('erro interno'))
+    );
+
+    provider = createMockProvider([
+      '{"tool_call": "failingTool", "args": {"input": "teste"}}',
+      '{"final_response": "tratou erro e continuou"}',
+    ]);
+    loop = new ReActLoop(provider, undefined, failingRegistry);
+
+    const result = await loop.execute(
+      'teste',
+      [{ role: 'user', content: 'teste' }],
+      undefined,
+      { jsonMode: true }
+    );
+
+    expect(result.finalAnswer).toBe('tratou erro e continuou');
+    expect(result.iterations).toBe(2);
+  });
+
+  it('esgota MAX_ITERATIONS sem final_response retorna mensagem de esgotamento', async () => {
+    // Sempre retorna tool_call (nunca final_response)
+    provider = createMockProvider(Array(10).fill(
+      '{"tool_call": "readFile", "args": {"path": "a.txt"}}'
+    ));
+    loop = new ReActLoop(provider, undefined, toolRegistry);
+
+    const result = await loop.execute(
+      'teste',
+      [{ role: 'user', content: 'teste' }],
+      undefined,
+      { jsonMode: true }
+    );
+
+    expect(result.iterations).toBe(5);
+    expect(result.finalAnswer).toContain('não conseguiu');
   });
 });
