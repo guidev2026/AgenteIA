@@ -9,12 +9,12 @@
  * O Reflector NÃO modifica o ReActLoop — ele é um step opcional
  * acionado APÓS a resposta final ser obtida.
  *
- * Zero dependências externas — usa apenas IProvider injetado.
+ * Zero dependências externas — usa apenas ICritiqueProvider injetado.
  * Compatível com recursos limitados (12GB RAM): reusa o mesmo modelo,
  * sem duplicar contexto do histórico ReAct.
  */
 
-import type { IProvider } from '../providers/types';
+import type { ICritiqueProvider, CorrectionStatus } from '../providers/types';
 
 // ── Interfaces públicas ──
 
@@ -28,86 +28,63 @@ export interface ReflectionError {
 export interface ReflectionResult {
   /** Conteúdo final (corrigido ou original) */
   finalContent: string;
-  /** Se houve correção */
-  wasCorrected: boolean;
+  /** Status da correção ('stable' | 'suspicious' | 'rejected') */
+  correctionStatus: CorrectionStatus;
   /** Lista de erros encontrados (vazia se nenhum) */
   errors: ReflectionError[];
 }
 
 // ── System Prompt de Crítica ──
 
-const CRITICAL_SYSTEM_PROMPT = `Você é um revisor crítico de respostas geradas por IA.
-Sua função é analisar a resposta abaixo e identificar problemas.
+/**
+ * Prompt de crítica otimizado (TASK 9).
+ *
+ * Otimizações:
+ * - Reduzido de ~40 linhas para ~20 linhas (menos tokens consumidos)
+ * - Prioriza exemplos concretos vs regras genéricas
+ * - Usa verbos imperativos no início de cada seção
+ * - Formato JSON simplificado
+ * - Removeu seções redundantes (contradições lógicas fundidas com alucinações)
+ */
+const CRITICAL_SYSTEM_PROMPT = `Analise criticamente a resposta abaixo.
 
-## REGRAS DE ANÁLISE
+REGRAS:
+- Alucinação: API/biblioteca/função que não existe no Node.js nativo
+- Erro sintaxe: JSON inválido, await sem async, chaves desbalanceadas
+- Ferramenta inválida: usar {TOOLS_LIST} com nome ou parâmetro errado
 
-### 1. Alucinações de API/Libraries
-- Detecte menções a bibliotecas ou APIs que não existem
-  (ex: "navigator.onInputError", "fs.readJsonSync")
-- Detecte imports de módulos inexistentes
-  (ex: "import { x } from 'react-ghost'")
-- Detecte funções padrão do Node.js chamadas com nomes errados
-  (use apenas: node:fs, node:path, node:http, node:child_process,
-   node:crypto, node:buffer)
+FORMATO RESPOSTA (JSON puro, sem markdown):
+{"hasError":bool,"errors":[{"type":"hallucination|syntax|inconsistency|logic","description":"string"}],"correctedOutput":"string"}
 
-### 2. Erros de Sintaxe
-- Blocos de código com syntax inválida
-  (ex: chaves desbalanceadas, await fora de async function)
-- TypeScript com tipos claramente errados
-  (ex: usar "any" onde há interface definida, tipos que não existem)
-
-### 3. Inconsistências com Ferramentas Disponíveis
-- Ferramentas disponíveis: {TOOLS_LIST}
-- Se a resposta sugere usar uma ferramenta que NÃO está na lista, é erro
-- Se a resposta inventa parâmetros que as ferramentas não aceitam, é erro
-
-### 4. Contradições Lógicas
-- A resposta se contradiz internamente?
-- A resposta afirma algo factualmente impossível?
-
-## FORMATO DE RESPOSTA (JSON estrito — sem markdown, sem comentários)
-
-{
-  "hasError": true ou false,
-  "errors": [
-    {
-      "type": "hallucination" | "syntax" | "inconsistency" | "logic",
-      "description": "Descrição clara do problema encontrado"
-    }
-  ],
-  "correctedOutput": "Versão corrigida da resposta (igual à original se hasError=false)"
-}
-
-IMPORTANTE:
-- Se NÃO houver erros, hasError=false e correctedOutput = resposta original EXATA
-- Se houver erros, correctedOutput deve ser a versão corrigida
-- NÃO invente erros onde não existem
-- NÃO adicione informações novas em correctedOutput
-- NÃO use formatação markdown na resposta, apenas JSON puro`;
+REGRAS EXTRAS:
+- Se não houver erro: hasError=false, correctedOutput=resposta original
+- NÃO invente erros nem adicione info nova na correção`;
 
 /**
  * Reflector: Executa uma chamada de crítica sobre a resposta gerada.
  *
  * Fluxo:
  *   1. Monta prompt de crítica com as tools disponíveis
- *   2. Chama provider.chat() com temperature baixa e format: 'json'
+ *   2. Chama critiqueProvider.critique() (via ICritiqueProvider)
  *   3. Parseia o JSON de retorno
  *   4. Decide se houve correção e retorna ReflectionResult
  *
  * SRP: Apenas reflexão crítica. Não gerencia histórico, não executa ferramentas.
+ * LSP: Usa ICritiqueProvider em vez de IProvider — o Reflector não precisa
+ *      de chat() genérico, apenas do método critique() especializado.
  */
 export class Reflector {
   /**
-   * @param provider Provider para fazer a chamada de crítica
+   * @param critiqueProvider Provider especializado para crítica de respostas
    * @param toolRegistry Registro de ferramentas (para listar tools disponíveis)
-   * @throws Error se provider não for fornecido
+   * @throws Error se critiqueProvider não for fornecido
    */
   constructor(
-    private readonly provider: IProvider,
+    private readonly critiqueProvider: ICritiqueProvider,
     private readonly toolRegistry: { getToolNames(): string[] }
   ) {
-    if (!provider) {
-      throw new Error('Reflector: provider é obrigatório');
+    if (!critiqueProvider) {
+      throw new Error('Reflector: critiqueProvider é obrigatório');
     }
     if (!toolRegistry) {
       throw new Error('Reflector: toolRegistry é obrigatório');
@@ -127,7 +104,7 @@ export class Reflector {
     if (!trimmed) {
       return {
         finalContent: '',
-        wasCorrected: false,
+        correctionStatus: 'stable',
         errors: [],
       };
     }
@@ -139,55 +116,100 @@ export class Reflector {
     const fullPrompt = `${criticalPrompt}\n\n## RESPOSTA A SER ANALISADA\n\n${rawAnswer}\n\n## ANÁLISE`;
 
     try {
-      const response = await this.provider.chat({
+      // Usa critique() em vez de chat() — mais específico e com melhor controle
+      const critiqueResponse = await this.critiqueProvider.critique({
         model,
         prompt: fullPrompt,
         temperature: 0.1, // Baixa temperatura = mais determinístico
-        format: 'json',
       });
 
-      const content = response.response.trim();
+      const content = critiqueResponse.parsedJson;
 
-      // Tenta parsear o JSON de retorno
-      let parsed: Record<string, unknown>;
-      try {
-        parsed = JSON.parse(content);
-      } catch {
-        // Se não for JSON válido, retorna sem correção (fallback seguro)
-        return {
-          finalContent: rawAnswer,
-          wasCorrected: false,
-          errors: [],
-        };
-      }
+      const hasError = content.hasError === true;
+      const errors = this.parseErrors(content.errors);
+      const correctedOutput = content.correctedOutput as string | undefined;
 
-      const hasError = parsed.hasError === true;
-      const errors = this.parseErrors(parsed.errors);
-      const correctedOutput = parsed.correctedOutput as string | undefined;
-
-      // Decisão: corrige apenas se hasError=true e correctedOutput é válido
+      // ── CIRCUIT BREAKER (TASK 3) ──
+      // Valida a qualidade da correção antes de aceitá-la
       if (hasError && correctedOutput && correctedOutput.trim().length > 0) {
+        const similarity = this.computeSimilarity(rawAnswer, correctedOutput);
+
+        // Se a correção é quase idêntica ao original (>90% similaridade),
+        // o crítico provavelmente gerou um falso positivo
+        if (similarity > 0.9) {
+          return {
+            finalContent: rawAnswer, // Mantém original
+            correctionStatus: 'suspicious', // Sinaliza suspeita
+            errors, // Mantém erros reportados para transparência
+          };
+        }
+
+        // Se a correção mudou significativamente (<20% similaridade),
+        // pode ser alucinação do crítico — descarta a correção
+        if (similarity < 0.2) {
+          return {
+            finalContent: rawAnswer, // Mantém original
+            correctionStatus: 'suspicious',
+            errors,
+          };
+        }
+
+        // Correção válida: mudança moderada e com erros reportados
         return {
           finalContent: correctedOutput,
-          wasCorrected: true,
+          correctionStatus: 'stable',
           errors,
         };
       }
 
-      // Sem erros ou correção inválida → mantém original
+      // Sem erros → mantém original (stable)
       return {
         finalContent: rawAnswer,
-        wasCorrected: false,
+        correctionStatus: 'stable',
         errors,
       };
     } catch {
       // Timeout ou erro de conexão → retorna original sem reflexão
       return {
         finalContent: rawAnswer,
-        wasCorrected: false,
+        correctionStatus: 'rejected',
         errors: [],
       };
     }
+  }
+
+  /**
+   * Calcula similaridade entre duas strings usando Dice Coefficient
+   * sobre bigramas — leve, rápido e eficaz para detectar mudanças reais.
+   *
+   * Circuit Breaker: evita que falsos positivos do crítico (hasError=true
+   * com mudança mínima) ou alucinações (mudança drástica) contaminem
+   * a resposta final.
+   *
+   * @returns Valor entre 0 (completamente diferente) e 1 (idêntico)
+   */
+  private computeSimilarity(a: string, b: string): number {
+    const bigrams = (s: string): Set<string> => {
+      const set = new Set<string>();
+      const normalized = s.toLowerCase().replace(/\s+/g, ' ').trim();
+      for (let i = 0; i < normalized.length - 1; i++) {
+        set.add(normalized.slice(i, i + 2));
+      }
+      return set;
+    };
+
+    const bigramsA = bigrams(a);
+    const bigramsB = bigrams(b);
+
+    if (bigramsA.size === 0 && bigramsB.size === 0) return 1;
+    if (bigramsA.size === 0 || bigramsB.size === 0) return 0;
+
+    let intersection = 0;
+    for (const bigram of bigramsA) {
+      if (bigramsB.has(bigram)) intersection++;
+    }
+
+    return (2 * intersection) / (bigramsA.size + bigramsB.size);
   }
 
   /**

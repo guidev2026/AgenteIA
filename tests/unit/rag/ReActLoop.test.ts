@@ -341,7 +341,7 @@ describe('ReActLoop.execute() — Com Reflector (self-correction)', () => {
     reflector = {
       reflect: vi.fn().mockResolvedValue({
         finalContent: 'resposta boa',
-        wasCorrected: false,
+        correctionStatus: 'stable',
         errors: [],
       }),
     };
@@ -355,7 +355,7 @@ describe('ReActLoop.execute() — Com Reflector (self-correction)', () => {
     );
 
     expect(result.finalAnswer).toBe('resposta boa');
-    expect(result.wasCorrected).toBe(false);
+    expect(result.correctionStatus).toBe('stable');
     expect(reflector.reflect).toHaveBeenCalledTimes(1);
     expect(reflector.reflect).toHaveBeenCalledWith('FINAL_ANSWER: resposta boa', 'phi3:3b');
   });
@@ -365,7 +365,7 @@ describe('ReActLoop.execute() — Com Reflector (self-correction)', () => {
     reflector = {
       reflect: vi.fn().mockResolvedValue({
         finalContent: 'resposta corrigida',
-        wasCorrected: true,
+        correctionStatus: 'stable',
         errors: [{ type: 'hallucination', description: 'informação errada' }],
       }),
     };
@@ -379,7 +379,7 @@ describe('ReActLoop.execute() — Com Reflector (self-correction)', () => {
     );
 
     expect(result.finalAnswer).toBe('resposta corrigida');
-    expect(result.wasCorrected).toBe(true);
+    expect(result.correctionStatus).toBe('stable');
     expect(result.errors).toHaveLength(1);
     expect(result.errors![0].type).toBe('hallucination');
   });
@@ -389,7 +389,7 @@ describe('ReActLoop.execute() — Com Reflector (self-correction)', () => {
     reflector = {
       reflect: vi.fn().mockResolvedValue({
         finalContent: 'resposta refletida',
-        wasCorrected: false,
+        correctionStatus: 'stable',
         errors: [],
       }),
     };
@@ -412,7 +412,7 @@ describe('ReActLoop.execute() — Com Reflector (self-correction)', () => {
     reflector = {
       reflect: vi.fn().mockResolvedValue({
         finalContent: 'resposta json',
-        wasCorrected: false,
+        correctionStatus: 'stable',
         errors: [],
       }),
     };
@@ -426,7 +426,7 @@ describe('ReActLoop.execute() — Com Reflector (self-correction)', () => {
     );
 
     expect(result.finalAnswer).toBe('resposta json');
-    expect(result.wasCorrected).toBe(false);
+    expect(result.correctionStatus).toBe('stable');
     expect(reflector.reflect).toHaveBeenCalledWith('resposta json', 'phi3:3b');
   });
 
@@ -436,7 +436,7 @@ describe('ReActLoop.execute() — Com Reflector (self-correction)', () => {
     reflector = {
       reflect: vi.fn().mockResolvedValue({
         finalContent: 'resposta corrigida pelo refletor',
-        wasCorrected: true,
+        correctionStatus: 'stable',
         errors: [{ type: 'logic', description: 'contradição' }],
       }),
     };
@@ -450,7 +450,7 @@ describe('ReActLoop.execute() — Com Reflector (self-correction)', () => {
     );
 
     expect(result.finalAnswer).toBe('resposta corrigida pelo refletor');
-    expect(result.wasCorrected).toBe(true);
+    expect(result.correctionStatus).toBe('stable');
     expect(result.errors![0].type).toBe('logic');
   });
 
@@ -467,7 +467,7 @@ describe('ReActLoop.execute() — Com Reflector (self-correction)', () => {
     );
 
     expect(result.finalAnswer).toBe('FINAL_ANSWER: resposta');
-    expect(result.wasCorrected).toBeUndefined();
+    expect(result.correctionStatus).toBeUndefined();
   });
 
   it('reflect=true mas resposta vazia → Reflector é chamado (validação vazia dentro dele)', async () => {
@@ -475,7 +475,7 @@ describe('ReActLoop.execute() — Com Reflector (self-correction)', () => {
     reflector = {
       reflect: vi.fn().mockResolvedValue({
         finalContent: '',
-        wasCorrected: false,
+        correctionStatus: 'stable',
         errors: [],
       }),
     };

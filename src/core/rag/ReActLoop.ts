@@ -14,7 +14,7 @@
 import type { IProvider } from '../../providers/types';
 import type { CommandExecutor } from '../CommandExecutor';
 import type { ToolRegistry } from '../ToolRegistry';
-import type { Reflector, ReflectionError } from '../Reflector';
+import type { Reflector, ReflectionResult, ReflectionError } from '../Reflector';
 import { JsonValidator } from '../../validation/JsonValidator';
 import { PromptBuilder } from './PromptBuilder';
 import type { PromptConfig } from './PromptBuilder';
@@ -29,8 +29,8 @@ export interface ReActMessage {
 export interface ReActResult {
   finalAnswer: string;
   iterations: number;
-  /** Se a resposta passou pelo Reflector e foi corrigida */
-  wasCorrected?: boolean;
+  /** Status da correção do Reflector */
+  correctionStatus?: 'stable' | 'suspicious' | 'rejected';
   /** Erros encontrados pelo Reflector (vazio se não houve reflexão) */
   errors?: ReflectionError[];
 }
@@ -270,7 +270,7 @@ export class ReActLoop {
     return {
       finalAnswer: reflection.finalContent,
       iterations: result.iterations,
-      wasCorrected: reflection.wasCorrected,
+      correctionStatus: reflection.correctionStatus,
       errors: reflection.errors,
     };
   }

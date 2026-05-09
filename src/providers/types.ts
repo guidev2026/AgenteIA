@@ -63,3 +63,51 @@ export interface IProvider {
 export interface IEmbedProvider extends IProvider {
   embed(text: string, embedModel?: string, keepAlive?: string): Promise<number[]>;
 }
+
+// ── Interfaces de Crítica (Self-Correction) ──
+
+export interface CritiqueRequest {
+  /** Modelo a ser usado para a crítica */
+  model: string;
+  /** Prompt completo (system prompt + resposta a analisar) */
+  prompt: string;
+  /** Temperatura para a crítica (baixa = mais determinístico) */
+  temperature?: number;
+}
+
+export interface CritiqueResponse {
+  /** JSON parseado da resposta do crítico */
+  parsedJson: Record<string, unknown>;
+  /** Texto cru antes do parse (para debug/fallback) */
+  rawText: string;
+}
+
+/**
+ * Status da correção aplicada pelo Reflector:
+ * - 'stable'   → correção confiável, aplicada com sucesso
+ * - 'suspicious' → correção aplicada mas com ressalvas (ex: tamanho muito reduzido)
+ * - 'rejected'  → correção rejeitada (ex: similaridade muito baixa com original)
+ */
+export type CorrectionStatus = 'stable' | 'suspicious' | 'rejected';
+
+/**
+ * ICritiqueProvider: Interface para provedores que suportam crítica de respostas.
+ *
+ * LSP (Liskov Substitution): Cada provider implementa o método critique()
+ * da sua própria forma (Ollama usa format:'json', OpenAI usaria response_format,
+ * Anthropic usaria prompt engineering), sem vazar detalhes de implementação
+ * para o Reflector.
+ *
+ * SRP: Responsabilidade única — submeter um prompt de crítica e retornar JSON.
+ */
+export interface ICritiqueProvider {
+  /** Nome do provider para logging */
+  readonly name: string;
+  /**
+   * Submete um prompt de crítica e retorna o JSON parseado.
+   *
+   * @param request Prompt completo de crítica + resposta a analisar
+   * @returns Resposta parseada (parsedJson + rawText para fallback)
+   */
+  critique(request: CritiqueRequest): Promise<CritiqueResponse>;
+}

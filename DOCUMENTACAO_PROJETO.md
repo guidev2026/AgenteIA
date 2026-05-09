@@ -358,72 +358,119 @@ npm run dev -- chat "Explique o que é SOLID" --model llama3.2:3b
 
 ### Visão Geral
 
-O **Reflector** (`src/core/Reflector.ts`) é uma camada opcional de auto-correção que entra em ação **após** a resposta final ser gerada pelo ReAct Loop. Ele submete a resposta a um sistema de crítica (segunda chamada ao mesmo modelo, com baixa temperatura e formato JSON), e retorna uma versão corrigida se problemas forem detectados.
+O **Reflector** (`src/core/Reflector.ts`) é uma camada opcional de auto-correção que entra em ação **após** a resposta final ser gerada pelo ReAct Loop. Ele submete a resposta a um sistema de crítica (segunda chamada ao mesmo modelo, com baixa temperatura, via `ICritiqueProvider`), e retorna uma versão corrigida se problemas forem detectados.
 
-### Arquitetura
+### Arquitetura SOLID
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                      ReActLoop                                │
-│                                                              │
-│  1. execute() → modo texto ou JSON                           │
-│  2. Obtém finalAnswer + iterations                           │
-│  3. Se --reflect=true → applyReflection()                    │
-│       └── Reflector.reflect(finalAnswer, model)              │
-│       └── Retorna ReflectionResult                           │
-│  4. ReActLoop mescla resultado no ReActResult                │
-│                                                              │
-│  Propriedades adicionais no resultado:                       │
-│  - wasCorrected: boolean                                     │
-│  - errors: ReflectionError[]                                 │
-└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                         ReActLoop                                 │
+│                                                                  │
+│  1. execute() → modo texto ou JSON                               │
+│  2. Obtém finalAnswer + iterations                               │
+│  3. Se --reflect=true → applyReflection()                        │
+│       └── Reflector.reflect(finalAnswer, model)                  │
+│       └── Retorna ReflectionResult                               │
+│          { finalContent, correctionStatus, errors }              │
+│  4. ReActLoop mescla resultado no ReActResult                    │
+│                                                                  │
+│  Propriedades no resultado:                                      │
+│  - correctionStatus: 'stable' | 'suspicious' | 'rejected'       │
+│  - errors: ReflectionError[]                                     │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-### Interface
+### Interfaces
 
 ```typescript
+// ICritiqueProvider — ISP: especializado para crítica (não IProvider genérico)
+interface ICritiqueProvider {
+  readonly name: string;
+  critique(request: CritiqueRequest): Promise<CritiqueResponse>;
+}
+
+// CorrectionStatus — três estados (substitui wasCorrected: boolean)
+type CorrectionStatus = 'stable' | 'suspicious' | 'rejected';
+
 interface ReflectionError {
   type: 'hallucination' | 'syntax' | 'inconsistency' | 'logic';
   description: string;
 }
 
 interface ReflectionResult {
-  finalContent: string;      // Conteúdo corrigido (ou original)
-  wasCorrected: boolean;     // Se houve correção
-  errors: ReflectionError[]; // Erros encontrados (vazio se nenhum)
+  finalContent: string;         // Conteúdo corrigido (ou original)
+  correctionStatus: CorrectionStatus; // Status da correção
+  errors: ReflectionError[];    // Erros encontrados (vazio se nenhum)
+}
+
+// IReflectionContext — DIP: contexto formal de reflexão
+interface IReflectionContext {
+  enabled: boolean;
+  model: string;
+  temperature?: number;  // default 0.1
+  verbose?: boolean;
 }
 ```
 
-### Prompt de Crítica (CRITICAL_SYSTEM_PROMPT)
+### Prompt de Crítica (CRITICAL_SYSTEM_PROMPT) — Otimizado (TASK 9)
 
-O sistema de crítica analisa 4 categorias de problemas:
+Reduzido de ~40 para ~20 linhas, consumindo menos tokens:
 
-| Categoria | Detecta |
-|-----------|---------|
-| **Alucinações de API/Libraries** | Menções a bibliotecas que não existem (`import { x } from 'react-ghost'`), funções com nomes errados, módulos Node.js falsos |
-| **Erros de Sintaxe** | Blocos de código com syntax inválida, TypeScript com tipos errados |
-| **Inconsistências com Ferramentas** | Sugestões de ferramentas que não estão no ToolRegistry (`{TOOLS_LIST}`) |
-| **Contradições Lógicas** | Respostas que se contradizem internamente ou afirmam algo factualmente impossível |
+```
+Analise criticamente a resposta abaixo.
 
-### Fluxo de Execução
+REGRAS:
+- Alucinação: API/biblioteca/função que não existe no Node.js nativo
+- Erro sintaxe: JSON inválido, await sem async, chaves desbalanceadas
+- Ferramenta inválida: usar {TOOLS_LIST} com nome ou parâmetro errado
 
-1. **Resposta é gerada** pelo ReAct Loop (texto ou JSON mode)
-2. **Reflector.reflect()** é chamado com `temperature: 0.1` e `format: 'json'`
-3. **Modelo retorna JSON** com `{ hasError, errors, correctedOutput }`
-4. **Reflector parseia** o JSON e decide:
-   - Se `hasError=true` e `correctedOutput` é válido → resposta corrigida
-   - Se `hasError=false` ou `correctedOutput` vazio → mantém resposta original
-5. **ReActLoop** mescla o resultado (incluindo `wasCorrected` e `errors`)
+FORMATO RESPOSTA (JSON puro):
+{"hasError":bool,"errors":[...],"correctedOutput":"string"}
+
+REGRAS EXTRAS:
+- Se não houver erro: hasError=false, correctedOutput=resposta original
+- NÃO invente erros nem adicione info nova na correção
+```
+
+### Circuit Breaker (TASK 3) — Dice Coefficient
+
+O Circuit Breaker valida a qualidade da correção antes de aceitá-la:
+
+1. **Se similaridade > 90%** entre original e corrigido → `correctionStatus: 'suspicious'` (falso positivo — mantém original)
+2. **Se similaridade < 20%** → `correctionStatus: 'suspicious'` (alucinação do crítico — descarta correção)
+3. **Entre 20% e 90%** → `correctionStatus: 'stable'` (correção válida — aceita)
+
+O algoritmo usa **Dice Coefficient sobre bigramas** — leve, rápido e eficaz para detectar mudanças reais.
+
+### ErrorJournal (TASK 6) — Persistência
+
+O `ErrorJournal` (`src/core/ErrorJournal.ts`) persiste erros de reflexão em disco:
+
+```typescript
+class ErrorJournal {
+  addEntry(entry: Omit<ErrorJournalEntry, 'timestamp'>): void;
+  getRecentEntries(options?: { limit?: number; type?: string }): ErrorJournalEntry[];
+  getStats(): { total: number; byType: Record<string, number> };
+}
+```
+
+- Formato JSON versionado (`version: 1`)
+- Arquivo: `.soberano/error-journal.json`
+- FIFO: máximo 1024 entradas
+- Tolerante a falhas: arquivo corrompido ou versão inválida → retorna vazio
 
 ### Mecanismos de Robustez
 
 | Mecanismo | Descrição |
 |-----------|-----------|
-| **Fallback silencioso** | Se o JSON de retorno for inválido, retorna resposta original |
+| **Fallback silencioso** | Se o JSON de retorno for inválido ou timeout, retorna original com `correctionStatus: 'rejected'` |
 | **Flag `--reflect`** | Só ativa se explicitamente solicitado pelo usuário |
 | **String vazia** | Se `finalAnswer` for vazio, não perde tempo com crítica |
 | **Baixa temperatura** | `temperature: 0.1` → resposta mais determinística |
-| **Sem dependências** | Zero dependências externas — apenas `IProvider` injetado |
+| **Circuit Breaker** | Dice Coefficient 0.2–0.9 previne falsos positivos e alucinações do crítico |
+| **ErrorJournal** | Persistência de erros com limite FIFO e tolerância a corrupção |
+| **Flag `--verbose`** | Exibe detalhes da correção no stderr |
+| **Sem dependências** | Zero dependências externas — apenas `ICritiqueProvider` injetado |
 
 ### Exemplo de uso
 
@@ -431,8 +478,8 @@ O sistema de crítica analisa 4 categorias de problemas:
 # Chat com auto-correção ativada
 npm run dev -- chat "Explique SOLID" --reflect
 
-# ReAct + JSON + auto-correção
-npm run dev -- chat "Qual o conteúdo do package.json?" --json --reflect
+# ReAct + JSON + auto-correção + verbose
+npm run dev -- chat "Qual o conteúdo do package.json?" --json --reflect --verbose
 
 # Chat normal (sem reflexão)
 npm run dev -- chat "Explique SOLID"
@@ -545,8 +592,9 @@ A suíte de testes usa **Vitest** (v4.1.5) e está organizada em `tests/unit/`, 
 |--------|---------|--------|-------------|
 | **Core** | `tests/unit/core/ToolRegistry.test.ts` | 9 | Registro de tools, execução com/sem parâmetros, validação de existência |
 | **Core** | `tests/unit/core/CommandExecutor.test.ts` | 3 | Execução de comandos, captura stderr, erro de spawn |
-| **Core** | `tests/unit/core/Reflector.test.ts` | 10 | Instanciação, resposta correta (sem correção), resposta incorreta (com correção), resposta vazia/só espaços, JSON inválido, múltiplos erros, integração com toolRegistry, fallback de rede |
-| **Providers** | `tests/unit/providers/OllamaProvider.test.ts` | 17 | Chat com parâmetros, format=json, erro HTTP, embed. **Streaming:** tokens individuais, body com stream:true, erro HTTP no stream, linhas vazias/não-JSON, chunks TCP quebrados |
+| **Core** | `tests/unit/core/Reflector.test.ts` | 12 | Instanciação, resposta correta (sem correção), resposta incorreta (com correção), resposta vazia/só espaços, JSON inválido, múltiplos erros, integração com toolRegistry, fallback de rede, Circuit Breaker (similaridade >90%, <20%), ICritiqueProvider |
+| **Core** | `tests/unit/core/ErrorJournal.test.ts` | 8 | Criação, persistência, ordenação, filtro por tipo, limite FIFO, stats, arquivo corrompido, versão inválida |
+| **Providers** | `tests/unit/providers/OllamaProvider.test.ts` | 12 | Chat com parâmetros, format=json, erro HTTP, embed. **Streaming:** tokens individuais, body com stream:true, erro HTTP no stream, linhas vazias/não-JSON, chunks TCP quebrados |
 | **RAG** | `tests/unit/rag/Retriever.test.ts` | 13 | Cosine similarity, rankeamento, ordenação, busca vazia |
 | **RAG** | `tests/unit/rag/ReActLoop.test.ts` | 21 | **Text Mode:** ACTION/FINAL_ANSWER, limite 5 iterações, erro em ACTION, build de prompt, modelo padrão. **JSON Mode:** final_response direta, tool_call → ferramenta → final_response, detecção de loop repetido, fallback text mode, resposta não-JSON, formato desconhecido, erro em ferramenta, esgotamento de iterações. **Reflector:** text/json mode com reflect, correção, reflect=false, reflector não injetado, resposta vazia |
 | **RAG** | `tests/unit/rag/Chunker.test.ts` | 8 | Chunking por parágrafo, sentença, overlap, limite de chunks |

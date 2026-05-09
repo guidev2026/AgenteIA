@@ -45,5 +45,12 @@ export type { PromptConfig } from './rag/PromptBuilder';
 export { Reflector } from './Reflector';
 export type { ReflectionError, ReflectionResult } from './Reflector';
 
+// IReflectionContext (DIP — TASK 8)
+export type { IReflectionContext, ReflectionContextResult } from './ReflectionContext';
+
+// ErrorJournal (persistência de erros de reflexão)
+export { ErrorJournal } from './ErrorJournal';
+export type { ErrorJournalEntry, ErrorJournalData } from './ErrorJournal';
+
 // Validação JSON
 export { JsonValidator, ValidationError } from '../validation/JsonValidator';

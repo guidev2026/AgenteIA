@@ -1,4 +1,12 @@
-import type { ChatRequest, ChatResponse, EmbedResponse, IProvider } from './types';
+import type {
+  ChatRequest,
+  ChatResponse,
+  CritiqueRequest,
+  CritiqueResponse,
+  EmbedResponse,
+  ICritiqueProvider,
+  IProvider,
+} from './types';
 import { OllamaHttpClient } from './OllamaHttpClient';
 
 /**
@@ -25,7 +33,7 @@ import { OllamaHttpClient } from './OllamaHttpClient';
  * O método `chat()` é a interface pública; `post()` é o método privado que gerencia
  * a conexão TCP, timeout e parsing da resposta.
  */
-export class OllamaProvider implements IProvider {
+export class OllamaProvider implements IProvider, ICritiqueProvider {
   readonly name = 'Ollama';
 
   /** Host onde o Ollama está rodando (padrão: localhost) */
@@ -176,6 +184,43 @@ export class OllamaProvider implements IProvider {
       throw new Error('Embedding response returned no embeddings');
     }
     return data.embeddings[0];
+  }
+
+  /**
+   * critique: Submete um prompt de crítica ao modelo com formatação JSON.
+   *
+   * Diferenças do chat() normal:
+   * - stream: false (sempre resposta completa, não streaming)
+   * - format: 'json' (força o Ollama a retornar JSON válido)
+   * - temperature: 0.1 (baixa para ser mais determinístico)
+   * - num_predict: 1024 (limita tokens da crítica)
+   *
+   * @param request Prompt de crítica + resposta a analisar
+   * @returns CritiqueResponse com JSON parseado e rawText
+   */
+  async critique(request: CritiqueRequest): Promise<CritiqueResponse> {
+    const body = JSON.stringify({
+      model: request.model,
+      prompt: request.prompt,
+      stream: false,
+      temperature: request.temperature ?? 0.1,
+      format: 'json',
+      num_predict: 1024,
+      options: { num_ctx: 4096 },
+    });
+
+    const result = await this.http.post('/api/generate', body) as Record<string, unknown>;
+    const rawText = String(result.response ?? '');
+
+    let parsedJson: Record<string, unknown>;
+    try {
+      parsedJson = JSON.parse(rawText.trim());
+    } catch {
+      // Fallback seguro: se o modelo não retornar JSON válido, devolve vazio
+      parsedJson = {};
+    }
+
+    return { parsedJson, rawText };
   }
 
   // post() e postStream() foram extraídos para OllamaHttpClient (SRP)
