@@ -37,15 +37,16 @@ export interface ChatStrategy {
  * @param prompt  Prompt do usuário
  * @param jsonMode Se true, adiciona regras de resposta em formato JSON
  * @param ragDir  Diretório RAG opcional
- * @param fileReader  FileReader (injetado para RAGManager)
- * @param embedProvider Embed provider (injetado para RAGManager)
+ * @param skipPromptSuffix Se true, não adiciona o sufixo "Pergunta do usuário" —
+ *                         útil quando o prompt já está no histórico da sessão
  * @returns System prompt completo
  */
 export async function buildSystemPrompt(
   app: AppContext,
   prompt: string,
   jsonMode: boolean,
-  ragDir?: string
+  ragDir?: string,
+  skipPromptSuffix?: boolean
 ): Promise<string> {
   const { toolRegistry, fileReader, embedProvider } = app;
 
@@ -121,7 +122,9 @@ export async function buildSystemPrompt(
     );
   }
 
-  systemPromptParts.push('', `Pergunta do usuário: ${prompt}`);
+  if (!skipPromptSuffix) {
+    systemPromptParts.push('', `Pergunta do usuário: ${prompt}`);
+  }
 
   return systemPromptParts.join('\n');
 }

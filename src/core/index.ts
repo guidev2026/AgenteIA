@@ -49,5 +49,12 @@ export type { ReflectionError, ReflectionResult } from './Reflector';
 export { ErrorJournal } from './ErrorJournal';
 export type { ErrorJournalEntry, ErrorJournalData } from './ErrorJournal';
 
+// Session Store (Memória Episódica / Multi-turn)
+export { SessionStore } from './SessionStore';
+export type { Session, SessionSummary, ISessionStore } from './SessionStore';
+
+// Session Manager (orquestração de sessão ativa)
+export { SessionManager } from './SessionManager';
+
 // Validação JSON
 export { JsonValidator, ValidationError } from '../validation/JsonValidator';

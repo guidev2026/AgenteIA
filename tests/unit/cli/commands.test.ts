@@ -5,6 +5,7 @@
  * - Comandos individuais: read, dir, search, exec, chat
  * - Modos: normal e stream
  * - Erros: prompt vazio, comando desconhecido, falta de argumentos
+ * - Sessões: listagem, addMessage, flush (multi-turn)
  *
  * Arquitetura:
  *   runCommand() recebe CliArgs parseados e usa AppContext.
@@ -20,7 +21,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // Estado compartilhado (vi.hoisted → NÃO é hoisted, executado antes)
 // ═══════════════════════════════════════════════════════════════════════
 
-const { mockState, mockProvider, MockAppContext, MockStreamStrategy, MockReActStrategy } =
+const { mockState, mockProvider, MockAppContext, MockStreamStrategy, MockReActStrategy, mockSessionManager } =
   vi.hoisted(() => {
     // ── Objetos mock ──
     const mp: Record<string, unknown> = {
@@ -60,32 +61,35 @@ const { mockState, mockProvider, MockAppContext, MockStreamStrategy, MockReActSt
       ragDir: undefined as string | undefined,
     };
 
+    // ── Mock SessionManager ──
+    const mockSM = {
+      addMessage: vi.fn().mockResolvedValue(undefined),
+      getHistory: vi.fn().mockReturnValue([]),
+      flush: vi.fn().mockResolvedValue(undefined),
+      listSessions: vi.fn().mockResolvedValue([
+        {
+          id: 'abc12345-0000-0000-0000-000000000001',
+          createdAt: '2025-01-01T00:00:00.000Z',
+          updatedAt: '2025-01-01T01:00:00.000Z',
+          messageCount: 3,
+          title: 'Test Session',
+        },
+      ]),
+      getSessionId: vi.fn().mockReturnValue('abc12345'),
+    };
+
     // ── Classes mock construtíveis ──
     class MockCtx {
-      get fileReader() {
-        return ms.fileReader;
-      }
-      get commandExecutor() {
-        return ms.commandExecutor;
-      }
-      get toolRegistry() {
-        return ms.toolRegistry;
-      }
-      get provider() {
-        return ms.provider;
-      }
-      get embedProvider() {
-        return ms.embedProvider;
-      }
-      get model() {
-        return ms.model;
-      }
-      get jsonMode() {
-        return ms.jsonMode;
-      }
-      get ragDir() {
-        return ms.ragDir;
-      }
+      get fileReader() { return ms.fileReader; }
+      get commandExecutor() { return ms.commandExecutor; }
+      get toolRegistry() { return ms.toolRegistry; }
+      get provider() { return ms.provider; }
+      get embedProvider() { return ms.embedProvider; }
+      get model() { return ms.model; }
+      get jsonMode() { return ms.jsonMode; }
+      get ragDir() { return ms.ragDir; }
+      get sessionManager() { return mockSM; }
+      getSessionHistory() { return []; }
     }
 
     class MockStrat {
@@ -102,6 +106,7 @@ const { mockState, mockProvider, MockAppContext, MockStreamStrategy, MockReActSt
       MockAppContext: MockCtx,
       MockStreamStrategy: MockStrat,
       MockReActStrategy: MockReAct,
+      mockSessionManager: mockSM,
     };
   });
 
@@ -129,6 +134,14 @@ vi.mock('../../../src/core', () => ({
     }),
   },
   PromptBuilder: class {},
+  SessionManager: class {
+    addMessage = () => Promise.resolve(undefined);
+    getHistory = () => [];
+    flush = () => Promise.resolve(undefined);
+    listSessions = () => Promise.resolve([]);
+    getSessionId = () => 'mock-session-id';
+  },
+  SessionStore: class {},
 }));
 
 vi.mock('../../../src/cli/strategies', () => ({
@@ -237,6 +250,12 @@ describe('CLI Commands', () => {
 
   // ── chat ──
   describe('chat', () => {
+    beforeEach(() => {
+      // Reseta contadores dos mocks de sessão entre testes de chat
+      mockSessionManager.addMessage.mockClear();
+      mockSessionManager.flush.mockClear();
+    });
+
     it('deve usar ReActStrategy por padrão (sem --stream, sem --json)', async () => {
       const result = await runCommand(makeArgs('chat', ['explique SOLID']));
       expect(result).toBe('react strategy output');
@@ -274,13 +293,42 @@ describe('CLI Commands', () => {
         'Usage: soberano chat <prompt>'
       );
     });
+
+    it('deve adicionar mensagem ao histórico da sessão no chat', async () => {
+      await runCommand(makeArgs('chat', ['explique SOLID']));
+      expect(mockSessionManager.addMessage).toHaveBeenCalledWith(
+        { role: 'user', content: 'explique SOLID' },
+        'test-model'
+      );
+    });
+
+    it('deve chamar flush após o chat para persistir sessão', async () => {
+      await runCommand(makeArgs('chat', ['explique SOLID']));
+      expect(mockSessionManager.flush).toHaveBeenCalledOnce();
+    });
+  });
+
+  // ── sessions ──
+  describe('sessions', () => {
+    it('deve listar sessões disponíveis', async () => {
+      const result = await runCommand(makeArgs('sessions', []));
+      expect(result).toContain('Sessões disponíveis');
+      expect(result).toContain('abc12345');
+      expect(result).toContain('Test Session');
+    });
+
+    it('deve retornar "Nenhuma sessão" quando não há sessões', async () => {
+      mockSessionManager.listSessions.mockResolvedValueOnce([]);
+      const result = await runCommand(makeArgs('sessions', []));
+      expect(result).toBe('Nenhuma sessão encontrada.');
+    });
   });
 
   // ── Comando desconhecido ──
   describe('unknown command', () => {
     it('deve lançar erro com comando não reconhecido', async () => {
       await expect(runCommand(makeArgs('unknown', []))).rejects.toThrow(
-        'Unknown command: "unknown". Available: read, dir, search, exec, chat'
+        'Unknown command: "unknown". Available: read, dir, search, exec, chat, sessions'
       );
     });
   });

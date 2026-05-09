@@ -32,6 +32,8 @@ AgenteIA/
 │   │   ├── ToolRegistry.ts     # Registro de tools com JSON Schema + handlers
 │   │   ├── AppContext.ts       # Container DI com todas as dependências (DIP)
 │   │   ├── ProviderFactory.ts  # Factory para criar providers (OCP)
+│   │   ├── SessionStore.ts     # Persistência de conversas em disco (JSON)
+│   │   ├── SessionManager.ts   # Orquestração da sessão ativa + histórico
 │   │   └── rag/
 │   │       ├── index.ts        # Re-exports do módulo RAG
 │   │       ├── Chunker.ts      # Divisão de texto em chunks (SRP)
@@ -203,7 +205,8 @@ Interface de linha de comando que orquestra Core + Providers.
 | `dir` | `soberano dir <path>` | Lista conteúdo de um diretório |
 | `search` | `soberano search <dir> <pattern>` | Busca recursiva por padrão textual |
 | `exec` | `soberano exec <cmd>` | Executa comando shell (com `shell: false` por segurança) |
-| `chat` | `soberano chat <prompt> [--model] [--ollama] [--ollama-port] [--json] [--rag <dir>]` | Envia prompt para modelo Ollama com suporte a RAG |
+| `chat` | `soberano chat <prompt> [--model] [--ollama] [--ollama-port] [--json] [--rag <dir>] [--session <id>] [--new-session]` | Envia prompt para modelo Ollama com suporte a RAG e multi-turn |
+| `sessions` | `soberano sessions` | Lista sessões de conversa salvas |
 
 **Flags do comando `chat`:**
 - `--model <name>` — Modelo Ollama (padrão: `llama3.2:1b`)
@@ -211,6 +214,8 @@ Interface de linha de comando que orquestra Core + Providers.
 - `--ollama-port <port>` — Porta do Ollama (padrão: `11434`)
 - `--json` — Ativa Grammar Restraint: força resposta em JSON estrito e injeta system prompt `"Responda estritamente em formato JSON válido."`
 - `--rag <dir>` — Ativa RAG: indexa diretório e injeta chunks relevantes no contexto
+- `--session <id>` — Carrega uma sessão existente pelo UUID (retoma contexto da conversa anterior)
+- `--new-session` — Força a criação de uma nova sessão (ignora `--session`)
 
 ---
 
@@ -582,6 +587,138 @@ npm run dev -- chat "Explique a arquitetura" --rag . --json
 
 ---
 
+## 🔧 Tópico 14 — Memória Episódica / Multi-turn (Sessões de Conversa)
+
+### Visão Geral
+
+A **Memória Episódica** permite que o Soberano-Core mantenha o contexto de conversas entre múltiplas execuções do terminal. Cada sessão de chat é salva em disco como um arquivo `.json` dentro do diretório `.soberano/sessions/`, e pode ser retomada em qualquer momento usando a flag `--session <id>`.
+
+### Arquitetura SOLID
+
+A feature foi implementada com duas classes de responsabilidade única:
+
+```
+┌───────────────────────────────────────────────────────────────┐
+│                      SessionStore                              │
+│  (Persistência — SRP: ler/escrever arquivos .json em disco)    │
+│                                                               │
+│  Diretório: .soberano/sessions/<uuid>.json                    │
+│                                                               │
+│  + save(session): Promise<void>                               │
+│  + load(sessionId): Promise<Session | null>                   │
+│  + list(): Promise<SessionSummary[]>                          │
+│  + delete(sessionId): Promise<void>                           │
+└───────────────────────────────────────────────────────────────┘
+                             │
+                             ▼
+┌───────────────────────────────────────────────────────────────┐
+│                      SessionManager                            │
+│  (Orquestração — SRP: gerenciar sessão ativa em memória)      │
+│                                                               │
+│  + addMessage(msg, model): Promise<void>                      │
+│  + getHistory(): ChatMessage[]                                │
+│  + newSession(model): void                                    │
+│  + loadSession(sessionId): Promise<boolean>                   │
+│  + flush(): Promise<void>                                     │
+│  + listSessions(): Promise<SessionSummary[]>                  │
+│  + deleteSession(sessionId): Promise<void>                    │
+│  + getSessionId(): string | null                              │
+└───────────────────────────────────────────────────────────────┘
+```
+
+### Interface SessionStore
+
+```typescript
+interface Session {
+  id: string;                    // UUID v4
+  model: string;                 // Modelo utilizado (ex: "llama3.2:1b")
+  createdAt: string;             // ISO 8601
+  updatedAt: string;             // ISO 8601
+  title: string | null;          // Título extraído da 1ª mensagem do usuário
+  messages: ChatMessage[];       // Array de mensagens
+}
+
+interface SessionSummary {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+  title: string | null;
+}
+
+interface ChatMessage {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+}
+```
+
+### Fluxo de uso (exemplo real)
+
+```bash
+# Primeira interação → cria sessão automaticamente
+npm run dev -- chat "Qual a capital do Brasil?"
+
+# O SessionManager cria a sessão, adiciona a mensagem,
+# executa o chat, adiciona a resposta, faz flush().
+# Arquivo gerado: .soberano/sessions/<uuid>.json
+
+# Segunda interação: retomar a conversa
+npm run dev -- chat "E a população dela?" --session <uuid>
+
+# O SessionManager carrega o histórico (role: 'user'/'assistant'),
+# o ReActStrategy/StreamStrategy chama getHistory() e
+# constrói o prompt completo com todo o contexto anterior.
+
+# Forçar nova sessão (ignorar --session)
+npm run dev -- chat "Nova conversa" --new-session
+
+# Listar todas as sessões
+npm run dev -- sessions
+# Saída:
+#   abc12345...  09/05/2026 14:30:00  [3 msgs]  Qual a capital do Brasil?
+```
+
+### Integração com o fluxo de chat
+
+No `commands.ts`, o fluxo do comando `chat` agora inclui:
+
+1. **Antes da execução:** `sessionManager.addMessage({ role: 'user', content: prompt })` — adiciona a pergunta do usuário ao histórico
+2. **Injeção de contexto:** A estratégia (ReActStrategy/StreamStrategy) chama `sessionManager.getHistory()` para obter todas as mensagens anteriores e as converte no formato `role: "user"/"assistant"` para o prompt multi-turn
+3. **Após a execução:** `sessionManager.addMessage({ role: 'assistant', content: result })` — adiciona a resposta ao histórico
+4. **Persistência:** `sessionManager.flush()` — salva o arquivo `.json` em disco
+
+### Mecanismos de robustez
+
+| Mecanismo | Descrição |
+|-----------|-----------|
+| **Criação automática** | `addMessage()` sem sessão ativa → cria nova sessão automaticamente com UUID v4 |
+| **Extração de título** | A primeira mensagem do usuário vira o título (truncado em 80 caracteres) |
+| **Flush explícito** | A sessão só é persistida quando `flush()` é chamado — evita I/O em cada mensagem |
+| **Criação de diretório** | `mkdir({ recursive: true })` garante que `.soberano/sessions/` exista |
+| **Arquivo corrompido** | `SessionStore.load()` retorna `null` se JSON for inválido (não quebra o CLI) |
+| **Sessão inexistente** | `loadSession()` retorna `false` se não encontrar o arquivo |
+| **Zero dependências** | UUID v4 gerado com `crypto.randomUUID()` (nativo do Node.js 19+) |
+| **Data ISO 8601** | Timestamps gerados com `new Date().toISOString()` |
+
+### Exemplos de uso
+
+```bash
+# Fluxo multi-turn completo
+npm run dev -- chat "Explique o que é SOLID" --model phi3:3b
+# → Sessão criada automaticamente (mostra o UUID no stderr)
+
+npm run dev -- chat "Dê um exemplo de cada princípio" --session <uuid>
+# → Contexto preservado da conversa anterior
+
+# Listar sessões
+npm run dev -- sessions
+
+# Forçar nova sessão
+npm run dev -- chat "Nova conversa" --new-session
+```
+
+---
+
 ## 🧪 Testes Unitários
 
 A suíte de testes usa **Vitest** (v4.1.5) e está organizada em `tests/unit/`, espelhando a estrutura do `src/`.
@@ -648,13 +785,13 @@ npx vitest            # Modo watch (recarrega automático)
 - Zero dependências externas em produção (apenas `node:http`, `node:fs/promises`, `node:child_process`)
 - TypeScript configurado com strict mode
 - ✅ **SOLID implementado** — SRP (classes coesas), OCP (ProviderFactory), LSP (IProvider), ISP (interfaces enxutas), DIP (AppContext + injeção de dependências)
-- ✅ **119 testes unitários** passando com Vitest (10 arquivos: ToolRegistry, CommandExecutor, Reflector, ErrorJournal, OllamaProvider, Retriever, ReActLoop, Chunker, JsonValidator, commands)
+- ✅ **149 testes unitários** passando com Vitest (12 arquivos: ToolRegistry, CommandExecutor, Reflector, ErrorJournal, SessionStore, SessionManager, OllamaProvider, Retriever, ReActLoop, Chunker, JsonValidator, commands)
 
 📝 **Possíveis próximos passos (não implementados):**
 - [já implementado] ~~Adicionar streaming de respostas do Ollama (SSE)~~
 - [já implementado] ~~Adicionar camada de auto-correção (Reflector + --reflect)~~
+- [já implementado] ~~Adicionar suporte a sessões/conversa com histórico (multi-turn)~~
 - Implementar novos providers (OpenAI, Anthropic, etc.)
-- Adicionar suporte a sessões/conversa com histórico (multi-turn)
 - Expandir ToolRegistry com mais ferramentas (writeFile, searchFiles, etc.)
 - Melhorar chunking com overlap adaptativo por estrutura (AST-aware)
 - Adicionar reranking multi-stage para melhorar precisão da busca

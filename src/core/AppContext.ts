@@ -22,12 +22,17 @@ import { CommandExecutor } from './CommandExecutor';
 import { ToolRegistry } from './ToolRegistry';
 import { ProviderFactory } from './ProviderFactory';
 import type { ProviderConfig } from './ProviderFactory';
+import { SessionManager } from './SessionManager';
+import { SessionStore } from './SessionStore';
+import type { ReActMessage } from './rag/ReActLoop';
 
 export interface AppContextConfig {
   provider: ProviderConfig;
   model?: string;
   jsonMode?: boolean;
   ragDir?: string;
+  sessionId?: string;
+  newSession?: boolean;
 }
 
 export class AppContext {
@@ -39,6 +44,7 @@ export class AppContext {
   public readonly model: string;
   public readonly jsonMode: boolean;
   public readonly ragDir: string | undefined;
+  public readonly sessionManager: SessionManager;
 
   constructor(config: AppContextConfig) {
     // Utilitários base — sempre os mesmos
@@ -57,6 +63,35 @@ export class AppContext {
     this.model = config.model ?? 'llama3.2:1b';
     this.jsonMode = config.jsonMode ?? false;
     this.ragDir = config.ragDir;
+
+    // SessionManager — gerencia histórico da conversa multi-turn
+    const store = new SessionStore();
+    this.sessionManager = new SessionManager(store);
+
+    // Carrega sessão existente ou cria nova (de forma síncrona para o construtor)
+    this.initSession(config.sessionId, config.newSession).catch((err) => {
+      console.error('[AppContext] Falha ao inicializar sessão:', err);
+    });
+  }
+
+  private async initSession(sessionId?: string, newSession?: boolean): Promise<void> {
+    if (newSession) {
+      await this.sessionManager.newSession(this.model);
+    } else if (sessionId) {
+      const loaded = await this.sessionManager.loadSession(sessionId);
+      if (!loaded) {
+        console.warn(`[AppContext] Sessão "${sessionId}" não encontrada. Criando nova.`);
+        await this.sessionManager.newSession(this.model);
+      }
+    }
+  }
+
+  /**
+   * Helper para obter o histórico de mensagens da sessão ativa.
+   * Retorna array vazio se não houver sessão ativa.
+   */
+  getSessionHistory(): ReActMessage[] {
+    return this.sessionManager.getHistory();
   }
 
   /**

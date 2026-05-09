@@ -33,8 +33,15 @@ export class ReActStrategy implements ChatStrategy {
       toolRegistry,
     } = app;
 
+    // Obtém histórico da sessão ativa (vazio se não houver sessão)
+    const history = app.getSessionHistory();
+
     // Constrói o system prompt completo (RAG + rules)
-    const systemPrompt = await buildSystemPrompt(app, prompt, jsonMode, ragDir);
+    // skipPromptSuffix=true quando há histórico, pois o prompt já está lá
+    const systemPrompt = await buildSystemPrompt(
+      app, prompt, jsonMode, ragDir,
+      history.length > 0 // skipPromptSuffix
+    );
 
     // Cria o Reflector (self-correction) se --reflect estiver ativo
     // Type guard verifica se provider implementa ICritiqueProvider em runtime
@@ -77,10 +84,10 @@ export class ReActStrategy implements ChatStrategy {
         }
       : undefined;
 
-    // Executa o loop ReAct
+    // Executa o loop ReAct com histórico da sessão multi-turn
     const result = await reactLoop.execute(
       systemPrompt,
-      [], // histórico vazio (tudo já está no systemPrompt)
+      history, // histórico real da sessão (multi-turn)
       model,
       { jsonMode, reflect: reflectMode, stream: streamOpts }
     );

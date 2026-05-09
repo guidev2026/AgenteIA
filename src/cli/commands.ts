@@ -41,6 +41,10 @@ export interface CliArgs {
  * - AppContext gerencia a criação e injeção de TODAS as dependências.
  * - O comando não instancia diretamente providers, readers ou executors.
  * - Basta mudar o AppContextConfig para trocar de provider ou config.
+ *
+ * Flags de sessão:
+ *   --session <id>    → carrega uma sessão existente pelo UUID
+ *   --new-session     → força a criação de uma nova sessão (ignora --session)
  */
 function buildContext(parsed: CliArgs): AppContext {
   const model = (parsed.flags.model as string) || 'llama3.2:1b';
@@ -48,6 +52,8 @@ function buildContext(parsed: CliArgs): AppContext {
   const ollamaPort = Number(parsed.flags['ollama-port']) || 11434;
   const jsonMode = parsed.flags.json === true;
   const ragDir = parsed.flags.rag as string | undefined;
+  const sessionId = parsed.flags.session as string | undefined;
+  const newSession = parsed.flags['new-session'] === true;
 
   return new AppContext({
     provider: {
@@ -58,6 +64,8 @@ function buildContext(parsed: CliArgs): AppContext {
     model,
     jsonMode,
     ragDir,
+    sessionId,
+    newSession,
   });
 }
 
@@ -179,6 +187,9 @@ export async function runCommand(parsed: CliArgs): Promise<string> {
       const noThink = parsed.flags['no-think'] === true;
       const reflectMode = parsed.flags.reflect === true;
 
+      // Adiciona a mensagem do usuário ao histórico da sessão
+      await app.sessionManager.addMessage({ role: 'user', content: prompt }, app.model);
+
       // Estratégia: decide qual pipeline executar
       // - streaming direto: quando --stream está ativo, --json NÃO está, e provider suporta
       // - ReAct: quando --json está ativo OU streaming não é suportado
@@ -188,20 +199,50 @@ export async function runCommand(parsed: CliArgs): Promise<string> {
         ? new StreamStrategy()
         : new ReActStrategy();
 
-      return strategy.execute({
+      const result = await strategy.execute({
         app,
         prompt,
         streamMode,
         noThink,
         reflectMode,
       });
+
+      // Adiciona a resposta do assistente ao histórico e persiste
+      await app.sessionManager.addMessage({ role: 'assistant', content: result }, app.model);
+      await app.sessionManager.flush();
+
+      return result;
+    }
+
+    /**
+     * Comando: sessions
+     * Exemplo: soberano sessions
+     *
+     * Lista todas as sessões de conversa salvas, ordenadas por
+     * última atualização (mais recentes primeiro).
+     */
+    case 'sessions': {
+      const summaries = await app.sessionManager.listSessions();
+
+      if (summaries.length === 0) {
+        return 'Nenhuma sessão encontrada.';
+      }
+
+      const lines = summaries.map((s) => {
+        const date = new Date(s.updatedAt).toLocaleString('pt-BR');
+        const title = s.title ?? '(sem título)';
+        const sessionLabel = s.id.substring(0, 8) + '...';
+        return `  ${sessionLabel}  ${date}  [${s.messageCount} msgs]  ${title}`;
+      });
+
+      return 'Sessões disponíveis:\n' + lines.join('\n');
     }
 
     /** Fallback: comando não reconhecido */
     default:
       throw new Error(
         `Unknown command: "${parsed.command}". ` +
-        'Available: read, dir, search, exec, chat'
+        'Available: read, dir, search, exec, chat, sessions'
       );
   }
 }

@@ -114,6 +114,7 @@ Commands:
   search <dir> <pattern>          Busca recursiva por padrão
   exec  <cmd>                     Executa comando shell
   chat  <prompt>                  Conversa com Ollama (ReAct Loop com tools)
+  sessions                        Lista sessões de conversa salvas
 
 Chat Flags:
   --model <name>                  Modelo Ollama (ex: tinyllama:1b, phi3:3b)
@@ -123,6 +124,20 @@ Chat Flags:
   --rag <dir>                     Ativa RAG (Retrieval-Augmented Generation) com indexação do diretório
   --reflect                       Ativa auto-revisão (Reflector) da resposta final
   --no-think                      Desativa o indicador "pensando..." (útil para scripting)
+
+Session Flags (multi-turn):
+  --session <id>                  Carrega uma sessão de conversa existente pelo UUID
+  --new-session                   Força a criação de uma nova sessão (ignora --session)
+
+Sessões (Memória Episódica):
+  O histórico da conversa é salvo automaticamente em .soberano/sessions/.
+  Para continuar uma conversa: --session <id>
+  Para começar do zero: --new-session
+
+  Exemplo:
+    npm run dev -- chat "Explique SOLID" --new-session
+    npm run dev -- chat "Dê mais detalhes" --session <id-anterior>
+    npm run dev -- sessions
 
 ReAct Loop (com --json):
   O modelo tem acesso às ferramentas: readFile, readDir, execute.
