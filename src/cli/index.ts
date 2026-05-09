@@ -104,7 +104,8 @@ async function main(): Promise<void> {
 
   // Comando help: exibe documentação e encerra sem erro
   if (parsed.command === 'help') {
-    console.log(`🛡️  Soberano-Core CLI
+    console.log(`🛡️  Soberano-Core CLI — Agente IA com Function Calling / Tool Use
+
 Usage: npm run dev -- <command> [args] [flags]
 
 Commands:
@@ -112,13 +113,22 @@ Commands:
   dir   <path>                    Lista conteúdo de um diretório
   search <dir> <pattern>          Busca recursiva por padrão
   exec  <cmd>                     Executa comando shell
-  chat  <prompt>                  Conversa com Ollama (modelo padrão: phi3:3b)
+  chat  <prompt>                  Conversa com Ollama (ReAct Loop com tools)
 
-Flags:
+Chat Flags:
   --model <name>                  Modelo Ollama (ex: tinyllama:1b, phi3:3b)
   --ollama <host>                 Host do Ollama (padrão: localhost)
   --ollama-port <port>            Porta do Ollama (padrão: 11434)
-  --json                          Força resposta em JSON estrito (Grammar Restraint)
+  --json                          Ativa ReAct Loop + JSON estrito (Function Calling)
+
+ReAct Loop (com --json):
+  O modelo tem acesso às ferramentas: readFile, readDir, execute.
+  Ele decide automaticamente quando usá-las para responder sua pergunta.
+  Exemplo: npm run dev -- chat "Qual o conteúdo do package.json?" --json
+  O agente vai: ler o arquivo → processar → responder com os dados reais.
+
+  ⚠️  Segurança: execute usa shell:false (sem injeção de comandos).
+  ⚠️  Limite: 5 iterações no loop ReAct (evita loops infinitos).
 `);
     return;
   }

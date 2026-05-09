@@ -1,4 +1,4 @@
-import { FileReader, CommandExecutor } from '../core';
+import { FileReader, CommandExecutor, ToolRegistry } from '../core';
 import { OllamaProvider } from '../providers';
 
 /**
@@ -135,38 +135,46 @@ export async function runCommand(parsed: CliArgs): Promise<string> {
     /**
      * Comando: chat <prompt>
      *
-     * Pipeline completo do fluxo de IA:
-     * ┌──────────────┐
-     * │ 1. args.join │  prompt ← "Explique SOLID"
-     * └──────┬───────┘
-     *        │
-     * ┌──────▼───────┐
-     * │ 2. flags     │  model ← --model phi3:3b (ou padrão)
-     * │    parsing   │  host  ← --ollama localhost (ou padrão)
-     * │              │  port  ← --ollama-port 11434 (ou padrão)
-     * └──────┬───────┘
-     *        │
-     * ┌──────▼───────┐
-     * │ 3. new       │  Cria instância do provider com host:port
-     * │ OllamaProvider│
-     * └──────┬───────┘
-     *        │
-     * ┌──────▼───────┐
-     * │ 4. .chat()   │  Envia { model, prompt, temperature } via HTTP POST
-     * │              │  para Ollama em /api/generate
-     * └──────┬───────┘
-     *        │
-     * ┌──────▼───────┐
-     * │ 5. ChatResp  │  { response: "...", model: "phi3:3b", done: true }
-     * └──────┬───────┘
-     *        │
-     * ┌──────▼───────┐
-     * │ 6. Formata   │  "[phi3:3b]\n<resposta do modelo>"
-     * │    output     │
-     * └──────────────┘
+     * Pipeline com ReAct Loop (Reasoning + Acting):
      *
-     * Exemplo: soberano chat "Explique SOLID" --model tinyllama:1b
-     * Saída: "[tinyllama:1b]\nSOLID é um acrônimo..."
+     * ┌──────────────┐
+     * │ 1. args.join  │  prompt ← "Qual o conteúdo do package.json?"
+     * └──────┬───────┘
+     *        │
+     * ┌──────▼───────────────────────────────────────────┐
+     * │ 2. ToolRegistry.setup()                          │
+     * │    Registra: readFile, readDir, execute           │
+     * │    Gera JSON Schema com definições das tools      │
+     * └──────┬───────────────────────────────────────────┘
+     *        │
+     * ┌──────▼───────────────────────────────────────────┐
+     * │ 3. System Prompt                                 │
+     * │    "Você é um assistente com acesso a tools...    │
+     * │     Ferramentas disponíveis: [definitions]        │
+     * │     Responda em JSON estrito com:                 │
+     * │       tool_call + args   OU   final_response"     │
+     * └──────┬───────────────────────────────────────────┘
+     *        │
+     * ┌──────▼───────┐     ┌─────────────────────────┐
+     * │ 4. ReAct     │────▶│ provider.chat(prompt)    │──▶ Ollama /api/generate
+     * │    Loop      │     │ format: 'json'           │
+     * │ (max 5 iter) │◀────│ response (JSON parseado) │
+     * └──────┬───────┘     └─────────────────────────┘
+     *        │
+     *        │  parsed.tool_call?
+     *        ├── SIM ──▶ toolRegistry.execute(name, args)
+     *        │           │
+     *        │           ▼ resultado (string)
+     *        │           │
+     *        │     prompt += "\nResultado da ferramenta: " + resultado
+     *        │           │
+     *        │           └──▶ volta pro início do loop
+     *        │
+     *        │  parsed.final_response?
+     *        └── SIM ──▶ quebra loop → exibe final_response
+     *
+     * Exemplo: soberano chat "Qual o conteúdo do package.json?" --json
+     * Saída: "[llama3.2:1b]\nO arquivo package.json contém..."
      */
     case 'chat': {
       const prompt = parsed.args.join(' ');
@@ -175,35 +183,173 @@ export async function runCommand(parsed: CliArgs): Promise<string> {
       }
 
       // Extrai configurações dos flags (ou usa defaults)
-      // --model: qual modelo usar no Ollama (ex: tinyllama:1b, phi3:3b)
       const model = (parsed.flags.model as string) || 'llama3.2:1b';
-      // --ollama: host onde o Ollama está rodando
       const ollamaHost = (parsed.flags.ollama as string) || 'localhost';
-      // --ollama-port: porta da API do Ollama
       const ollamaPort = Number(parsed.flags['ollama-port']) || 11434;
-      // --json: ativa Grammar Restraint (força resposta em JSON estrito)
+      // --json: ativa Grammar Restraint + ReAct Loop (tool use)
       const useJson = parsed.flags.json === true;
 
-      // Instancia o provider com as configurações do usuário
       const provider = new OllamaProvider(ollamaHost, ollamaPort);
 
-      // System Prompt automático: injeta a instrução de JSON no prompt
-      // para que o modelo Qwen 1B/3B entenda o formato esperado,
-      // em conjunto com a flag format: "json" do Ollama.
-      const finalPrompt = useJson
-        ? `Responda estritamente em formato JSON válido.\n\n${prompt}`
-        : prompt;
+      // ── ToolRegistry: registra as ferramentas disponíveis ──
+      const toolRegistry = new ToolRegistry();
 
-      // Envia o prompt ao modelo e aguarda a resposta
-      const response = await provider.chat({
-        model,
-        prompt: finalPrompt,
-        temperature: 0.7, // 0.7 = equilíbrio entre coerência e criatividade
-        format: useJson ? 'json' : undefined,
-      });
+      // Tool: readFile — lê conteúdo de um arquivo
+      toolRegistry.register(
+        'readFile',
+        'Read the complete contents of a file from disk',
+        {
+          filePath: {
+            type: 'string',
+            description: 'Absolute or relative path to the file',
+          },
+        },
+        async (args) => {
+          const content = await fileReader.readFile(args.filePath as string);
+          return content;
+        }
+      );
 
-      // Formata a saída: cabeçalho com nome do modelo + resposta
-      return `[${response.model}]\n${response.response}`;
+      // Tool: readDir — lista entradas de um diretório
+      toolRegistry.register(
+        'readDir',
+        'List all files and directories inside a directory',
+        {
+          dirPath: {
+            type: 'string',
+            description: 'Absolute or relative path to the directory',
+          },
+        },
+        async (args) => {
+          const entries = await fileReader.readDir(args.dirPath as string);
+          return entries.join('\n');
+        }
+      );
+
+      // Tool: execute — executa comando shell (seguro: shell:false)
+      toolRegistry.register(
+        'execute',
+        'Execute a shell command safely (no shell injection). Returns stdout.',
+        {
+          command: {
+            type: 'string',
+            description: 'The executable name (e.g., ls, git, node)',
+          },
+          args: {
+            type: 'array',
+            description: 'Arguments as array of strings, e.g. ["-la"]',
+          },
+        },
+        async (toolArgs) => {
+          const cmd = toolArgs.command as string;
+          // O LLM pode enviar args como array JS ou string. Normalizamos.
+          const rawArgs = toolArgs.args;
+          const cmdArgs: string[] = Array.isArray(rawArgs)
+            ? rawArgs.map(String)
+            : typeof rawArgs === 'string'
+              ? rawArgs.split(' ')
+              : [];
+          const result = await commandExecutor.execute(cmd, cmdArgs);
+          return result.stdout || result.stderr || '(no output)';
+        }
+      );
+
+      // ── System Prompt com definições das tools ──
+      const toolDefinitions = toolRegistry.getDefinitions();
+      const toolNames = toolRegistry.getToolNames().join(', ');
+
+      const systemPrompt = [
+        'Você é um assistente com acesso a ferramentas para ler arquivos e executar comandos.',
+        `Seu diretório de trabalho atual é: ${process.cwd()}`,
+        'Use caminhos relativos a este diretório OU caminhos absolutos.',
+        '',
+        `Ferramentas disponíveis: ${toolNames}`,
+        '',
+        'Definições das ferramentas (JSON Schema):',
+        toolDefinitions,
+        '',
+        'REGRAS DE RESPOSTA (ESCRITAS EM JSON):',
+        '1. Se precisar usar uma ferramenta, responda APENAS com:',
+        '   {"tool_call": "<nome_da_ferramenta>", "args": {<parametros>}}',
+        '2. Se já tiver a resposta final, responda APENAS com:',
+        '   {"final_response": "<sua resposta completa>"}',
+        '3. NUNCA responda com texto fora do JSON.',
+        '4. NÃO invente informações — use as ferramentas para obter dados reais.',
+        '',
+        `Pergunta do usuário: ${prompt}`,
+      ].join('\n');
+
+      // ── ReAct Loop ──
+      const MAX_ITERATIONS = 5;
+      let accumulatedPrompt = systemPrompt;
+      let lastToolCall = '';  // Rastreia tool + args para detectar loops
+
+      for (let i = 0; i < MAX_ITERATIONS; i++) {
+        // Se for a última iteração, força o modelo a sintetizar resposta final
+        const promptForThisIteration =
+          i === MAX_ITERATIONS - 1
+            ? accumulatedPrompt + '\n\nATENÇÃO: Esta é sua ÚLTIMA iteração. Você JÁ possui todos os dados necessários. Responda APENAS com {"final_response": "<sua resposta baseada nos dados coletados>"}. NÃO chame mais ferramentas.'
+            : accumulatedPrompt;
+
+        // Envia prompt ao modelo com format: 'json' ativo
+        const response = await provider.chat({
+          model,
+          prompt: promptForThisIteration,
+          temperature: 0.2,
+          format: 'json',
+        });
+
+        // Parse do JSON da resposta
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = JSON.parse(response.response);
+        } catch {
+          // Fallback: se não for JSON, retorna cru (modo texto normal)
+          return `[${response.model}]\n${response.response}`;
+        }
+
+        // Cenário A: tool call → executa e continua o loop
+        if (parsed.tool_call && typeof parsed.tool_call === 'string') {
+          const toolName = parsed.tool_call;
+          const toolArgs = (parsed.args as Record<string, unknown>) || {};
+          const callFingerprint = `${toolName}:${JSON.stringify(toolArgs)}`;
+
+          // Detecta chamadas repetidas consecutivas (loop infinito)
+          if (callFingerprint === lastToolCall && i < MAX_ITERATIONS - 1) {
+            // Mesma tool + mesmos args: força resposta final na próxima
+            accumulatedPrompt += `\n\nATENÇÃO: Você já chamou "${toolName}" com os mesmos argumentos. Use os dados já recebidos e responda com {"final_response": "<resposta>"}.`;
+            lastToolCall = '';
+            continue;
+          }
+
+          lastToolCall = callFingerprint;
+
+          let toolResult: string;
+          try {
+            toolResult = await toolRegistry.execute(toolName, toolArgs);
+          } catch (err: any) {
+            toolResult = `Error: ${err.message}`;
+          }
+
+          // Alimenta o resultado de volta no prompt acumulado
+          accumulatedPrompt += `\n\nResultado da ferramenta ${toolName}: ${toolResult}`;
+          continue;
+        }
+
+        // Cenário B: resposta final → exibe e encerra
+        if (parsed.final_response && typeof parsed.final_response === 'string') {
+          return `[${response.model}]\n${parsed.final_response}`;
+        }
+
+        // Cenário C: formato desconhecido → fallback
+        return `[${response.model}]\n${response.response}`;
+      }
+
+      // Loop esgotado sem resposta final
+      throw new Error(
+        `ReAct loop exhausted (${MAX_ITERATIONS} iterations) without final_response. ` +
+        `Last tool result length: ${accumulatedPrompt.length} chars.`
+      );
     }
 
     /** Fallback: comando não reconhecido */

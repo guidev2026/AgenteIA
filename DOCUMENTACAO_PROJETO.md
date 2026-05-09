@@ -27,7 +27,8 @@ AgenteIA/
 │   ├── core/
 │   │   ├── index.ts          # Re-exports públicos do módulo core
 │   │   ├── FileReader.ts     # Abstração do sistema de arquivos
-│   │   └── CommandExecutor.ts # Execução segura de comandos shell
+│   │   ├── CommandExecutor.ts # Execução segura de comandos shell
+│   │   └── ToolRegistry.ts   # Registro de tools com JSON Schema + handlers
 │   └── providers/
 │       ├── index.ts          # Re-exports públicos do módulo providers
 │       ├── types.ts          # Interfaces: ChatRequest, ChatResponse, IProvider
@@ -180,15 +181,96 @@ Terminal (usuário)
 
 ---
 
+## 🔧 Tópico 11 — Function Calling / Tool Use (ReAct Loop)
+
+### Arquitetura do ToolRegistry
+
+O `ToolRegistry` (`src/core/ToolRegistry.ts`) implementa um registro de ferramentas (tools) no formato JSON Schema, compatível com o padrão OpenAI/Function Calling.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   ToolRegistry                          │
+│  tools: Map<                                            │
+│    string,                // nome da tool               │
+│    { definition, handler }                              │
+│  >                                                      │
+│                                                         │
+│  + register(name, description, paramsSchema, handler)   │
+│  + getDefinitions(): string   // JSON Schema p/ prompt  │
+│  + execute(name, args): Promise    // chama handler     │
+│  + hasTool(name): boolean                               │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Tools registradas:**
+| Tool | Descrição | Parâmetros |
+|------|-----------|------------|
+| `readFile` | Lê conteúdo completo de um arquivo | `filePath: string` |
+| `readDir` | Lista entradas de um diretório | `dirPath: string` |
+| `execute` | Executa comando shell (seguro: `shell:false`) | `command: string`, `args: string[]` |
+
+### ReAct Loop (Reasoning + Acting)
+
+O comando `chat` com `--json` implementa o padrão ReAct:
+
+```
+Usuário: "Qual o conteúdo do package.json?" --json
+
+1. System Prompt → envia definições JSON Schema das tools +
+   regras de resposta: tool_call + args OU final_response
+   
+2. Modelo responde:
+   {"tool_call": "readFile", "args": {"filePath": "package.json"}}
+
+3. ToolRegistry.execute("readFile", {filePath: "package.json"})
+   → lê o arquivo real → resultado alimentado de volta no prompt
+
+4. Modelo responde:
+   {"final_response": "O package.json contém..."}
+   
+5. CLI exibe a resposta final
+```
+
+**Mecanismos de segurança e robustez:**
+| Mecanismo | Descrição |
+|-----------|-----------|
+| `ToolRegistry.execute()` | Verifica se a tool existe antes de executar — nunca expõe handlers dinamicamente |
+| `CommandExecutor.execute()` | Usa `spawn` com `shell: false` — previne injeção de comandos |
+| Limite de iterações | Máximo 5 iterações no ReAct Loop (evita loops infinitos) |
+| Detecção de loop | Rastreia chamadas repetidas da mesma tool com mesmos args; força `final_response` |
+| Última iteração forçada | Na 5ª iteração, injeta instrução para o modelo sintetizar resposta final |
+| `JSON.parse()` + `try/catch` | Toda resposta do modelo é validada como JSON antes de ser processada |
+
+### Exemplo de uso
+
+```bash
+# Modo ReAct: o agente decide quais ferramentas usar
+npm run dev -- chat "Qual o conteúdo do package.json?" --json --model llama3.2:1b
+
+# Modo texto normal (sem ferramentas)
+npm run dev -- chat "Explique o que é SOLID" --model llama3.2:3b
+```
+
+### Limitações conhecidas
+
+- **Modelos 1B–3B** podem não seguir o schema JSON perfeitamente. O sistema inclui fallbacks (resposta crua se JSON inválido, força de resposta final na última iteração).
+- **Modelos 7B+ são recomendados** para uso consistente do ReAct Loop em produção.
+- O formato `final_response` pode conter JSON parcial/alucinado em modelos muito pequenos.
+
+---
+
 ## 📌 Status Atual
 
 ✅ Projeto estruturalmente completo com:
 - Core funcional (leitura de arquivos, busca textual, execução de comandos)
+- **ToolRegistry** com 3 tools registradas (readFile, readDir, execute)
+- **ReAct Loop** — agente decide automaticamente quando usar ferramentas
 - Integração com Ollama via HTTP
 - CLI funcional com 6 comandos (read, dir, search, exec, chat, help)
 - Grammar Restraint / Structured Outputs — força modelos a responderem em JSON estrito via `--json`
 - Validação de robustez com `JSON.parse()` + `try/catch` para prevenir alucinações
-- Injeção automática de system prompt quando `--json` é usado
+- Detecção de loops com força de resposta final na última iteração
+- Injeção automática de system prompt com definições JSON Schema das tools
 - Arquitetura modular e extensível (interface `IProvider` permite novos providers)
 - Zero dependências externas em produção (apenas `node:http`, `node:fs/promises`, `node:child_process`)
 - TypeScript configurado com strict mode
@@ -196,6 +278,6 @@ Terminal (usuário)
 📝 **Possíveis próximos passos (não implementados):**
 - Adicionar streaming de respostas do Ollama (SSE)
 - Implementar novos providers (OpenAI, Anthropic, etc.)
-- Adicionar testes unitários
-- Adicionar suporte a sessões/conversa com histórico
-- Suporte a tools/funções para o agente executar ações
+- Adicionar testes unitários com Vitest/Jest
+- Adicionar suporte a sessões/conversa com histórico (multi-turn)
+- Expandir ToolRegistry com mais ferramentas (writeFile, searchFiles, etc.)
