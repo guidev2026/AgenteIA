@@ -33,3 +33,6 @@ coverage/
 
 # Cache RAG (índice de embeddings)
 .soberano/
+
+# Ferramenta Cline (instruções do CTO)
+.clinerules

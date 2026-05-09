@@ -459,6 +459,8 @@ npx vitest            # Modo watch (recarrega automático)
 - Arquitetura modular e extensível (interface `IProvider` permite novos providers)
 - Zero dependências externas em produção (apenas `node:http`, `node:fs/promises`, `node:child_process`)
 - TypeScript configurado com strict mode
+- ✅ **SOLID implementado** — SRP (classes coesas), OCP (ProviderFactory), LSP (IProvider), ISP (interfaces enxutas), DIP (AppContext + injeção de dependências)
+- ✅ **67 testes unitários** passando com Vitest (7 arquivos: ToolRegistry, CommandExecutor, OllamaProvider, Retriever, ReActLoop, Chunker, JsonValidator)
 
 📝 **Possíveis próximos passos (não implementados):**
 - Adicionar streaming de respostas do Ollama (SSE)
@@ -468,5 +470,3 @@ npx vitest            # Modo watch (recarrega automático)
 - Melhorar chunking com overlap adaptativo por estrutura (AST-aware)
 - Adicionar reranking multi-stage para melhorar precisão da busca
 - Suporte a PDF, DOCX e outros formatos no RAG
-- Abstrair módulos nativos (fs, child_process) por trás de interfaces (ISP/DIP) para testabilidade total
-- Adicionar testes de integração com Ollama real (opcional)
