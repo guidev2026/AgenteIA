@@ -25,11 +25,37 @@ export class StreamStrategy implements ChatStrategy {
       );
     }
 
+    // Obtém o histórico multi-turn da sessão ativa
+    const history = app.getSessionHistory();
+
     // Constrói o system prompt completo (RAG + tools)
-    const systemPrompt = await buildSystemPrompt(app, prompt, jsonMode, ragDir);
+    // skipPromptSuffix=true quando há histórico, pois o prompt já está lá
+    const systemPrompt = await buildSystemPrompt(app, prompt, jsonMode, ragDir, history.length > 0);
+
+    // Injeta histórico multi-turn no prompt, se houver
+    // Formato: [USER]/[ASSISTANT] blocks para o modelo entender o contexto
+    const historyBlock = history.length > 0
+      ? '\n\n' + history.map(msg => {
+          const label = msg.role === 'user' ? 'USER'
+            : msg.role === 'assistant' ? 'ASSISTANT'
+            : 'SYSTEM';
+          return `[${label}]: ${msg.content}`;
+        }).join('\n\n') + '\n\n'
+      : '';
+
+    // Se não houver histórico, usa systemPrompt direto (já tem o sufixo "Pergunta do usuário")
+    // Se houver histórico, o buildSystemPrompt já pulou o sufixo, então precisamos
+    // concatenar o historyBlock + a nova pergunta explicitamente
+    const finalPrompt = history.length > 0
+      ? systemPrompt + historyBlock + `Pergunta do usuário: ${prompt}`
+      : systemPrompt;
 
     // Indica o modelo no início da resposta
-    process.stdout.write(`[${model}] `);
+    if (history.length > 0) {
+      process.stdout.write(`[${model} (continuando sessão)] `);
+    } else {
+      process.stdout.write(`[${model}] `);
+    }
 
     let fullResponse = '';
 
@@ -38,7 +64,7 @@ export class StreamStrategy implements ChatStrategy {
     if (!streamMode || !provider.streamChat) {
       const resp = await provider.chat({
         model,
-        prompt: systemPrompt,
+        prompt: finalPrompt,
         temperature: 0.3,
       });
       process.stdout.write(resp.response);
@@ -50,7 +76,7 @@ export class StreamStrategy implements ChatStrategy {
     try {
       for await (const token of provider.streamChat({
         model,
-        prompt: systemPrompt,
+        prompt: finalPrompt,
         temperature: 0.3,
       })) {
         process.stdout.write(token);
@@ -64,7 +90,7 @@ export class StreamStrategy implements ChatStrategy {
       console.error('🔄 Fazendo fallback para modo normal...');
       const fallbackResp = await provider.chat({
         model,
-        prompt: systemPrompt,
+        prompt: finalPrompt,
         temperature: 0.3,
       });
       return `[${model}]\n${fallbackResp.response}`;
