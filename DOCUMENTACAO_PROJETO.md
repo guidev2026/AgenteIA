@@ -134,7 +134,7 @@ Implementação concreta do `IProvider` para comunicação com instância local 
 - **Grammar Restraint nativo:** quando `format: 'json'` é ativado, o body inclui `"format": "json"` — o Ollama força o modelo a responder em JSON estrito
 - **Embeddings:** método `embed(request)` que envia POST para `/api/embed` com `keep_alive` configurável
 - **Vetores 384-dim:** retorna `number[]` (float32) padrão do modelo all-minilm
-- **Streaming SSE:** método `streamChat()` retorna `AsyncIterable<string>` que emite tokens um a um conforme chegam do servidor
+- **Streaming SSE:** método `streamChat()` retorna `AsyncIterable<string>` que emite tokens um a um conforme chegam do servidor. O ReActLoop consome este stream nativamente via `for await...of` quando `stream.enabled = true` e `stream.onToken` é fornecido
 - **Validação de robustez:** se `format: 'json'` foi solicitado, a resposta é validada com `JSON.parse()` dentro de `try/catch`. Se o modelo alucinar JSON inválido, um erro claro é lançado protegendo o CLI
 - Timeout de 300 segundos para respostas de modelos grandes
 - Tratamento de erros de rede, parsing e status HTTP
@@ -596,12 +596,12 @@ A suíte de testes usa **Vitest** (v4.1.5) e está organizada em `tests/unit/`, 
 | **Core** | `tests/unit/core/ErrorJournal.test.ts` | 8 | Criação, persistência, ordenação, filtro por tipo, limite FIFO, stats, arquivo corrompido, versão inválida |
 | **Providers** | `tests/unit/providers/OllamaProvider.test.ts` | 12 | Chat com parâmetros, format=json, erro HTTP, embed. **Streaming:** tokens individuais, body com stream:true, erro HTTP no stream, linhas vazias/não-JSON, chunks TCP quebrados |
 | **RAG** | `tests/unit/rag/Retriever.test.ts` | 13 | Cosine similarity, rankeamento, ordenação, busca vazia |
-| **RAG** | `tests/unit/rag/ReActLoop.test.ts` | 21 | **Text Mode:** ACTION/FINAL_ANSWER, limite 5 iterações, erro em ACTION, build de prompt, modelo padrão. **JSON Mode:** final_response direta, tool_call → ferramenta → final_response, detecção de loop repetido, fallback text mode, resposta não-JSON, formato desconhecido, erro em ferramenta, esgotamento de iterações. **Reflector:** text/json mode com reflect, correção, reflect=false, reflector não injetado, resposta vazia |
+| **RAG** | `tests/unit/rag/ReActLoop.test.ts` | 26 | **Text Mode:** ACTION/FINAL_ANSWER, limite 5 iterações, erro em ACTION, build de prompt, modelo padrão. **JSON Mode:** final_response direta, tool_call → ferramenta → final_response, detecção de loop repetido, fallback text mode, resposta não-JSON, formato desconhecido, erro em ferramenta, esgotamento de iterações. **Reflector:** text/json mode com reflect, correção, reflect=false, reflector não injetado, resposta vazia. **Streaming:** jsonMode + stream, textMode + stream, sem streamChat (fallback), stream desativado, múltiplas iterações com stream |
 | **RAG** | `tests/unit/rag/Chunker.test.ts` | 8 | Chunking por parágrafo, sentença, overlap, limite de chunks |
 | **Validation** | `tests/unit/validation/JsonValidator.test.ts` | 13 | validate(), tryValidate(), ValidationError |
 | **CLI** | `tests/unit/cli/commands.test.ts` | 15 | Comandos read/dir/search/exec/chat, flags --stream/--json/--no-think, fallback streaming direto, erro de comando faltando |
 
-**Total: 106 testes, todos passando.**
+**Total: 119 testes, todos passando.**
 
 ### Estratégia de Mocks (zero I/O real)
 
@@ -648,7 +648,7 @@ npx vitest            # Modo watch (recarrega automático)
 - Zero dependências externas em produção (apenas `node:http`, `node:fs/promises`, `node:child_process`)
 - TypeScript configurado com strict mode
 - ✅ **SOLID implementado** — SRP (classes coesas), OCP (ProviderFactory), LSP (IProvider), ISP (interfaces enxutas), DIP (AppContext + injeção de dependências)
-- ✅ **106 testes unitários** passando com Vitest (9 arquivos: ToolRegistry, CommandExecutor, Reflector, OllamaProvider, Retriever, ReActLoop, Chunker, JsonValidator, commands)
+- ✅ **119 testes unitários** passando com Vitest (10 arquivos: ToolRegistry, CommandExecutor, Reflector, ErrorJournal, OllamaProvider, Retriever, ReActLoop, Chunker, JsonValidator, commands)
 
 📝 **Possíveis próximos passos (não implementados):**
 - [já implementado] ~~Adicionar streaming de respostas do Ollama (SSE)~~

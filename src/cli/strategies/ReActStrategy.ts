@@ -14,6 +14,11 @@
 import type { ChatStrategy, ChatContext } from './ChatStrategy';
 import { buildSystemPrompt } from './ChatStrategy';
 import type { ICritiqueProvider } from '../../providers/types';
+
+/** Type guard: verifica se provider implementa ICritiqueProvider em runtime */
+function isCritiqueProvider(p: unknown): p is ICritiqueProvider {
+  return typeof (p as ICritiqueProvider).critique === 'function';
+}
 import { ReActLoop, CommandExecutor, Reflector, ErrorJournal } from '../../core';
 
 export class ReActStrategy implements ChatStrategy {
@@ -32,9 +37,9 @@ export class ReActStrategy implements ChatStrategy {
     const systemPrompt = await buildSystemPrompt(app, prompt, jsonMode, ragDir);
 
     // Cria o Reflector (self-correction) se --reflect estiver ativo
-    // O provider precisa implementar ICritiqueProvider (OllamaProvider sim)
-    const critiqueProvider = provider as unknown as ICritiqueProvider;
-    const reflector = reflectMode
+    // Type guard verifica se provider implementa ICritiqueProvider em runtime
+    const critiqueProvider = isCritiqueProvider(provider) ? provider : undefined;
+    const reflector = reflectMode && critiqueProvider
       ? new Reflector(critiqueProvider, toolRegistry)
       : undefined;
 
@@ -64,12 +69,20 @@ export class ReActStrategy implements ChatStrategy {
       );
     }
 
+    // Prepara opções de streaming (efeito "máquina de escrever")
+    const streamOpts = streamMode
+      ? {
+          enabled: true,
+          onToken: (token: string) => process.stdout.write(token),
+        }
+      : undefined;
+
     // Executa o loop ReAct
     const result = await reactLoop.execute(
       systemPrompt,
       [], // histórico vazio (tudo já está no systemPrompt)
       model,
-      { jsonMode, reflect: reflectMode }
+      { jsonMode, reflect: reflectMode, stream: streamOpts }
     );
 
     // ── REGISTRO NO ERRORJOURNAL ──
@@ -129,32 +142,20 @@ export class ReActStrategy implements ChatStrategy {
       }
     }
 
-    // ── STREAMING PÓS-REACT ──
-    // Se --stream está ativo e o provider suporta, faz streaming
-    // da resposta final como efeito "máquina de escrever"
-    if (streamMode && provider.streamChat) {
-      const finalPrompt = `Responda de forma concisa e direta: ${result.finalAnswer}`;
-      process.stdout.write(`[${model}] `);
-
-      try {
-        for await (const token of provider.streamChat({
-          model,
-          prompt: finalPrompt,
-          temperature: 0.3,
-        })) {
-          process.stdout.write(token);
-        }
-        process.stdout.write('\n');
-      } catch {
-        // Fallback: mostra a resposta final sem streaming
-        return `[${model}]\n${result.finalAnswer}`;
+    // ── RESPOSTA FINAL ──
+    // Se --stream está ativo, o streaming já foi feito inline pelo ReActLoop
+    // via callback onToken. A resposta final é retornada normalmente.
+    // Inclui badge de correção se aplicável
+    if (streamMode) {
+      // Streaming já foi feito pelo ReActLoop durante a execução.
+      // Só precisamos do \n final e do badge de correção no stderr
+      if (result.correctionStatus && result.correctionStatus !== 'stable') {
+        console.error(`[Refletido: ${result.correctionStatus}]`);
       }
-
-      return ''; // Já escrevemos no stdout
+      return ''; // Já escrevemos os tokens no stdout via onToken
     }
 
     // Modo normal (sem streaming): retorna a resposta formatada
-    // Inclui badge de correção se aplicável
     const correctionBadge = result.correctionStatus && result.correctionStatus !== 'stable'
       ? ` [Refletido: ${result.correctionStatus}]`
       : '';

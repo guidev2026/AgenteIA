@@ -31,6 +31,26 @@ function createMockProvider(responses: string[]): IProvider {
   };
 }
 
+/**
+ * Cria um mock de provider com streamChat implementado.
+ * Usa um AsyncGenerator que itera sobre os tokens da resposta.
+ */
+function createMockStreamProvider(responseContent: string): IProvider {
+  return {
+    name: 'MockStreamProvider',
+    chat: vi.fn().mockResolvedValue({ response: responseContent, model: 'mock', done: true }),
+    embed: vi.fn().mockResolvedValue([0.1, 0.2, 0.3]),
+    streamChat: vi.fn().mockImplementation(
+      async function* () {
+        // Yield character by character para simular streaming real
+        for (const char of responseContent) {
+          yield char;
+        }
+      }
+    ),
+  };
+}
+
 function createMockExecutor(): CommandExecutor {
   return {
     execute: vi.fn().mockResolvedValue({
@@ -468,6 +488,148 @@ describe('ReActLoop.execute() — Com Reflector (self-correction)', () => {
 
     expect(result.finalAnswer).toBe('FINAL_ANSWER: resposta');
     expect(result.correctionStatus).toBeUndefined();
+  });
+
+  it('streamMode + streamChat disponível → faz streaming dos tokens (jsonMode)', async () => {
+    const tokens: string[] = [];
+    provider = createMockStreamProvider('{"final_response": "resposta com stream"}');
+    const toolRegistry = createMockToolRegistry();
+    const loop = new ReActLoop(provider, undefined, toolRegistry);
+
+    const result = await loop.execute(
+      'Seja útil',
+      [{ role: 'user', content: 'pergunta' }],
+      'phi3:3b',
+      {
+        jsonMode: true,
+        stream: {
+          enabled: true,
+          onToken: (token: string) => { tokens.push(token); },
+        },
+      }
+    );
+
+    expect(result.finalAnswer).toBe('resposta com stream');
+    expect(result.iterations).toBe(1);
+    // Deve ter recebido tokens via callback (streamChat foi usado)
+    expect(tokens.join('')).toBe('{"final_response": "resposta com stream"}');
+    expect(provider.streamChat).toHaveBeenCalledTimes(1);
+  });
+
+  it('streamMode + streamChat disponível → faz streaming na última iteração (textMode)', async () => {
+    const tokens: string[] = [];
+    provider = createMockStreamProvider('FINAL_ANSWER: resultado streaming');
+    const executor = createMockExecutor();
+    const loop = new ReActLoop(provider, executor);
+
+    const result = await loop.execute(
+      'Seja útil',
+      [{ role: 'user', content: 'pergunta' }],
+      'phi3:3b',
+      {
+        stream: {
+          enabled: true,
+          onToken: (token: string) => { tokens.push(token); },
+        },
+      }
+    );
+
+    expect(result.finalAnswer).toContain('FINAL_ANSWER: resultado streaming');
+    expect(tokens.join('')).toContain('FINAL_ANSWER: resultado streaming');
+    expect(provider.streamChat).toHaveBeenCalledTimes(1);
+  });
+
+  it('streamMode=true mas provider sem streamChat → usa chat() normal sem stream', async () => {
+    provider = {
+      name: 'NoStreamProvider',
+      chat: vi.fn().mockResolvedValue({ response: 'FINAL_ANSWER: sem stream', model: 'mock', done: true }),
+      embed: vi.fn().mockResolvedValue([0.1]),
+      // Sem streamChat — proposital
+    };
+    const executor = createMockExecutor();
+    const loop = new ReActLoop(provider, executor);
+
+    let onTokenCalled = false;
+    const result = await loop.execute(
+      'teste',
+      [{ role: 'user', content: 'teste' }],
+      'phi3:3b',
+      {
+        stream: {
+          enabled: true,
+          onToken: () => { onTokenCalled = true; },
+        },
+      }
+    );
+
+    expect(result.finalAnswer).toContain('sem stream');
+    expect(result.iterations).toBe(1);
+    // onToken nunca deve ser chamado porque streamChat não existe
+    expect(onTokenCalled).toBe(false);
+  });
+
+  it('streamMode=false → não usa streaming mesmo com streamChat disponível', async () => {
+    provider = createMockStreamProvider('FINAL_ANSWER: sem streaming');
+    const executor = createMockExecutor();
+    const loop = new ReActLoop(provider, executor);
+
+    const result = await loop.execute(
+      'teste',
+      [{ role: 'user', content: 'teste' }],
+      'phi3:3b',
+      { stream: undefined }
+    );
+
+    expect(result.finalAnswer).toContain('FINAL_ANSWER: sem streaming');
+    // streamChat não deve ser chamado porque stream está undefined
+    expect(provider.streamChat).not.toHaveBeenCalled();
+  });
+
+  it('streamMode + streamChat + MÚLTIPLAS iterações → resolve corretamente com streaming', async () => {
+    const tokens: string[] = [];
+    // Provider com streamChat: a primeira chamada retorna tool_call, a segunda final_response
+    // O sendPrompt sempre prefere streamChat sobre chat quando streamOpts está ativo,
+    // então o streamMock precisa ser configurado para múltiplas chamadas.
+    let streamCallCount = 0;
+    const streamMock = vi.fn().mockImplementation(
+      async function* () {
+        streamCallCount++;
+        if (streamCallCount === 1) {
+          yield '{"tool_call": "readFile", "args": {"path": "test.txt"}}';
+        } else {
+          yield '{"final_response": "stream final"}';
+        }
+      }
+    );
+
+    provider = {
+      name: 'MultiIterationStreamProvider',
+      chat: vi.fn().mockResolvedValue({ response: 'fallback', model: 'mock', done: true }),
+      streamChat: streamMock,
+      embed: vi.fn().mockResolvedValue([0.1]),
+    };
+    const toolRegistry = createMockToolRegistry();
+    const loop = new ReActLoop(provider, undefined, toolRegistry);
+
+    const result = await loop.execute(
+      'Seja útil',
+      [{ role: 'user', content: 'pergunta' }],
+      'phi3:3b',
+      {
+        jsonMode: true,
+        stream: {
+          enabled: true,
+          onToken: (token: string) => { tokens.push(token); },
+        },
+      }
+    );
+
+    expect(result.finalAnswer).toBe('stream final');
+    expect(result.iterations).toBe(2);
+    // streamChat foi chamado duas vezes (tool_call + final_response)
+    expect(streamMock).toHaveBeenCalledTimes(2);
+    // Tokens da última iteração (final_response)
+    expect(tokens.join('')).toContain('stream final');
   });
 
   it('reflect=true mas resposta vazia → Reflector é chamado (validação vazia dentro dele)', async () => {

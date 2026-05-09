@@ -6,8 +6,10 @@
  * 2. Envia para o provider e interpreta ações vs resposta final
  * 3. Se for JSON mode (--json), usa ToolRegistry + formato tool_call/final_response
  * 4. Se for modo texto, usa ACTION/FINAL_ANSWER + CommandExecutor
+ * 5. Se streamMode=true, usa provider.streamChat() com callback onToken
  *
  * Compatível com IProvider.chat(request: ChatRequest): ChatResponse
+ * e opcionalmente provider.streamChat(request: ChatRequest): AsyncIterable<string>
  * (prompt único, não array de mensagens — formata tudo inline)
  */
 
@@ -33,6 +35,17 @@ export interface ReActResult {
   correctionStatus?: 'stable' | 'suspicious' | 'rejected';
   /** Erros encontrados pelo Reflector (vazio se não houve reflexão) */
   errors?: ReflectionError[];
+}
+
+/** Opções de streaming para o ReActLoop */
+export interface StreamOptions {
+  /** Se true, ativa streaming das respostas do modelo */
+  enabled: boolean;
+  /**
+   * Callback chamado para cada token recebido durante o streaming.
+   * Usado para efeito "máquina de escrever" no terminal.
+   */
+  onToken: (token: string) => void;
 }
 
 export class ReActLoop {
@@ -85,13 +98,52 @@ export class ReActLoop {
   }
 
   /**
+   * Envia um prompt para o provider e retorna a resposta completa.
+   * Se streamMode estiver ativo e o provider suportar streamChat,
+   * faz streaming dos tokens + acumula o buffer para o parser.
+   */
+  private async sendPrompt(
+    prompt: string,
+    model: string,
+    temperature: number,
+    format?: 'json',
+    streamOpts?: StreamOptions
+  ): Promise<string> {
+    // Modo streaming: usa streamChat + acumula buffer
+    if (streamOpts?.enabled && this.provider.streamChat) {
+      let buffer = '';
+      for await (const token of this.provider.streamChat({
+        model,
+        prompt,
+        temperature,
+        format,
+      })) {
+        buffer += token;
+        streamOpts.onToken(token);
+      }
+      return buffer;
+    }
+
+    // Modo normal: usa chat() padrão
+    const response = await this.provider.chat({
+      model,
+      prompt,
+      temperature,
+      format,
+    });
+    return response.response.trim();
+  }
+
+  /**
    * Executa o loop ReAct no modo JSON (tool_call / final_response).
    * Usado quando --json está ativo. Usa ToolRegistry + detecção de loop.
+   * Suporta streaming se streamOpts for fornecido.
    */
   private async executeJsonMode(
     systemPrompt: string,
     history: ReActMessage[],
-    model: string
+    model: string,
+    streamOpts?: StreamOptions
   ): Promise<ReActResult> {
     let accumulatedPrompt = this.buildPrompt(systemPrompt, history);
     let lastToolCall = '';
@@ -106,14 +158,13 @@ export class ReActLoop {
             'NÃO chame mais ferramentas.'
           : accumulatedPrompt;
 
-      const response = await this.provider.chat({
+      const content = await this.sendPrompt(
+        promptForThisIteration,
         model,
-        prompt: promptForThisIteration,
-        temperature: 0.2,
-        format: 'json',
-      });
-
-      const content = response.response.trim();
+        0.2,
+        'json',
+        streamOpts // streaming para todas iterações; sendPrompt decide
+      );
 
       // Usa JsonValidator para parsear
       const parsed = this.jsonValidator.tryValidate<Record<string, unknown>>(content);
@@ -180,11 +231,13 @@ export class ReActLoop {
   /**
    * Executa o loop ReAct no modo texto (ACTION / FINAL_ANSWER).
    * Formato legado, sem JSON.
+   * Suporta streaming se streamOpts for fornecido.
    */
   private async executeTextMode(
     systemPrompt: string,
     history: ReActMessage[],
-    model: string
+    model: string,
+    streamOpts?: StreamOptions
   ): Promise<ReActResult> {
     let iteration = 0;
     let finalAnswer = '';
@@ -193,12 +246,13 @@ export class ReActLoop {
     while (iteration < MAX_ITERATIONS) {
       iteration++;
 
-      const response = await this.provider.chat({
-        model,
+      const content = await this.sendPrompt(
         prompt,
-        temperature: 0.3,
-      });
-      const content = response.response.trim();
+        model,
+        0.3,
+        undefined,
+        streamOpts // streaming para todas iterações; sendPrompt decide
+      );
 
       if (content.includes('FINAL_ANSWER') || content.includes('FINAL ANSWER')) {
         finalAnswer = content;
@@ -283,13 +337,14 @@ export class ReActLoop {
    * @param model Modelo (default: tinyllama:1b)
    * @param options.jsonMode Se true, usa JSON mode (tool_call/final_response)
    * @param options.reflect Se true, aplica Reflector pós-resposta (self-correction)
+   * @param options.stream Opções de streaming (se undefined, usa chat() normal)
    * @returns Resultado com resposta final e número de iterações
    */
   async execute(
     systemPrompt: string,
     history: ReActMessage[],
     model?: string,
-    options?: { jsonMode?: boolean; reflect?: boolean }
+    options?: { jsonMode?: boolean; reflect?: boolean; stream?: StreamOptions }
   ): Promise<ReActResult> {
     const resolvedModel = model ?? 'tinyllama:1b';
     const reflectFlag = options?.reflect === true;
@@ -297,9 +352,9 @@ export class ReActLoop {
     let result: ReActResult;
 
     if (options?.jsonMode && this.toolRegistry) {
-      result = await this.executeJsonMode(systemPrompt, history, resolvedModel);
+      result = await this.executeJsonMode(systemPrompt, history, resolvedModel, options?.stream);
     } else {
-      result = await this.executeTextMode(systemPrompt, history, resolvedModel);
+      result = await this.executeTextMode(systemPrompt, history, resolvedModel, options?.stream);
     }
 
     // Aplica reflexão após a resposta final (ambos os modos)
