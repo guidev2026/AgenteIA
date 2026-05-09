@@ -6,13 +6,22 @@
   "scripts": {
     "build": "tsc",
     "dev": "ts-node src/cli/index.ts",
-    "start": "node dist/cli/index.js"
+    "start": "node dist/cli/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
-  "keywords": ["ai", "agent", "ollama", "cli"],
+  "keywords": [
+    "ai",
+    "agent",
+    "ollama",
+    "cli"
+  ],
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^20.11.0",
     "ts-node": "^10.9.2",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^4.1.5"
   }
 }
