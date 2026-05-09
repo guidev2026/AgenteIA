@@ -20,6 +20,11 @@ export interface ChatResponse {
   done: boolean;
 }
 
+export interface EmbedResponse {
+  /** Array de embeddings gerados (cada input gera um vetor) */
+  embeddings: number[][];
+}
+
 export interface IProvider {
   /** Nome do provider para logging */
   readonly name: string;

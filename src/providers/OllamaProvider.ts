@@ -1,5 +1,5 @@
 import * as http from 'node:http';
-import type { ChatRequest, ChatResponse, IProvider } from './types';
+import type { ChatRequest, ChatResponse, EmbedResponse, IProvider } from './types';
 
 /**
  * OllamaProvider: Implementação concreta do IProvider que se comunica
@@ -101,6 +101,41 @@ export class OllamaProvider implements IProvider {
       model: data.model,
       done: data.done,
     };
+  }
+
+  /**
+   * Gera um embedding (vetor de floats) para um texto usando o modelo all-minilm.
+   *
+   * Pipeline:
+   *   1. Envia POST /api/embed com { model, input, keep_alive }
+   *   2. Extrai embeddings[0] do response
+   *   3. Retorna o vetor de números
+   *
+   * O parâmetro keep_alive controla quanto tempo o modelo fica carregado na RAM:
+   *   - "0s": descarrega imediatamente (economiza RAM)
+   *   - "30s": mantém carregado por 30s (útil para indexação em lote)
+   *   - "-1": mantém indefinidamente (não recomendado com 12GB RAM)
+   *
+   * @param text  O texto a ser embedado
+   * @param embedModel  Nome do modelo de embedding (padrão: all-minilm)
+   * @param keepAlive  Tempo de vida do modelo na RAM (padrão: "30s")
+   * @returns Vetor de floats representando o embedding
+   */
+  async embed(
+    text: string,
+    embedModel: string = 'all-minilm',
+    keepAlive: string = '30s'
+  ): Promise<number[]> {
+    const body = JSON.stringify({
+      model: embedModel,
+      input: text,
+      keep_alive: keepAlive,
+    });
+    const data: EmbedResponse = await this.post('/api/embed', body);
+    if (!data.embeddings || data.embeddings.length === 0) {
+      throw new Error('Embedding response returned no embeddings');
+    }
+    return data.embeddings[0];
   }
 
   /**

@@ -4,3 +4,6 @@ export { CommandExecutor } from './CommandExecutor';
 export type { CommandResult } from './CommandExecutor';
 export { ToolRegistry } from './ToolRegistry';
 export type { ToolDefinition } from './ToolRegistry';
+export { RAGManager } from './RAGManager';
+export type { ChunkEntry, SearchMatch } from './RAGManager';
+export { cosineSimilarity } from './RAGManager';

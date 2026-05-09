@@ -28,11 +28,12 @@ AgenteIA/
 │   │   ├── index.ts          # Re-exports públicos do módulo core
 │   │   ├── FileReader.ts     # Abstração do sistema de arquivos
 │   │   ├── CommandExecutor.ts # Execução segura de comandos shell
-│   │   └── ToolRegistry.ts   # Registro de tools com JSON Schema + handlers
+│   │   ├── ToolRegistry.ts   # Registro de tools com JSON Schema + handlers
+│   │   └── RAGManager.ts     # Retrieval-Augmented Generation (embeddings + busca semântica)
 │   └── providers/
 │       ├── index.ts          # Re-exports públicos do módulo providers
-│       ├── types.ts          # Interfaces: ChatRequest, ChatResponse, IProvider
-│       └── OllamaProvider.ts # Cliente HTTP para Ollama (modelos de IA locais)
+│       ├── types.ts          # Interfaces: ChatRequest, ChatResponse, EmbedRequest, EmbedResponse, IProvider
+│       └── OllamaProvider.ts # Cliente HTTP para Ollama (chat + embeddings)
 ```
 
 ---
@@ -69,6 +70,24 @@ Camada segura sobre `child_process.spawn` do Node.js.
 
 ---
 
+### RAGManager (`RAGManager.ts`)
+
+Gerencia o pipeline de Retrieval-Augmented Generation: chunking de arquivos, geração de embeddings, busca por similaridade de cosseno e cache em disco. Zero dependências externas (usa apenas `node:fs/promises`, `node:path`, `node:crypto`).
+
+**Métodos:**
+| Método | Descrição |
+|--------|-----------|
+| `ensureIndex(dir)` | Indexa diretório (chunks → embeddings → cache). Só reindexa se houver mudanças |
+| `retrieve(query, dir)` | Busca semântica: top 5 chunks por cosine similarity |
+| `formatContext(matches)` | Formata chunks como `[arquivo:linha]` para injeção no prompt |
+| `connectProvider(provider)` | Conecta ao OllamaProvider para gerar embeddings via all-minilm |
+
+**Tipos exportados:**
+- `ChunkEntry`: `{ text: string; file: string; line: number; embedding: number[] }`
+- `SearchMatch`: `{ file: string; line: number; content: string; score: number }`
+
+---
+
 ## 🔌 Módulo Providers (`src/providers/`)
 
 Responsável pela comunicação com modelos de IA. Arquitetura baseada em interfaces para permitir múltiplos providers no futuro.
@@ -81,7 +100,9 @@ Define os contratos da API:
 |-----------|-----------|
 | `ChatRequest` | `{ model, prompt, temperature?, max_tokens?, format? }` — requisição para o modelo. `format: 'json'` ativa Grammar Restraint |
 | `ChatResponse` | `{ response, model, done }` — resposta do modelo |
-| `IProvider` | `{ readonly name, chat(request): Promise<ChatResponse> }` — interface que todo provider deve implementar |
+| `EmbedRequest` | `{ model, prompt }` — requisição de embedding para o Ollama |
+| `EmbedResponse` | `{ embedding: number[] }` — resposta de embedding (vetor 384-dim do all-minilm) |
+| `IProvider` | `{ readonly name, chat(request): Promise<ChatResponse>, embed(request): Promise<EmbedResponse> }` — interface que todo provider deve implementar |
 
 ### OllamaProvider (`OllamaProvider.ts`)
 
@@ -91,6 +112,8 @@ Implementação concreta do `IProvider` para comunicação com instância local 
 - Conexão com servidor Ollama em `host:port` configurável (padrão: `localhost:11434`)
 - Envio de prompts via POST para `/api/generate` com suporte a `temperature`, `num_predict`, `stream: false` e `format: "json"`
 - **Grammar Restraint nativo:** quando `format: 'json'` é ativado, o body inclui `"format": "json"` — o Ollama força o modelo a responder em JSON estrito
+- **Embeddings:** método `embed(request)` que envia POST para `/api/embeddings` com `keep_alive: "5m"` para reutilizar sessão do all-minilm
+- **Vetores 384-dim:** retorna `number[]` (float32) padrão do modelo all-minilm
 - **Validação de robustez:** se `format: 'json'` foi solicitado, a resposta é validada com `JSON.parse()` dentro de `try/catch`. Se o modelo alucinar JSON inválido, um erro claro é lançado protegendo o CLI
 - Timeout de 300 segundos para respostas de modelos grandes
 - Tratamento de erros de rede, parsing e status HTTP
@@ -117,13 +140,14 @@ Interface de linha de comando que orquestra Core + Providers.
 | `dir` | `soberano dir <path>` | Lista conteúdo de um diretório |
 | `search` | `soberano search <dir> <pattern>` | Busca recursiva por padrão textual |
 | `exec` | `soberano exec <cmd>` | Executa comando shell (com `shell: false` por segurança) |
-| `chat` | `soberano chat <prompt> [--model] [--ollama] [--ollama-port] [--json]` | Envia prompt para modelo Ollama e exibe resposta |
+| `chat` | `soberano chat <prompt> [--model] [--ollama] [--ollama-port] [--json] [--rag <dir>]` | Envia prompt para modelo Ollama com suporte a RAG |
 
 **Flags do comando `chat`:**
 - `--model <name>` — Modelo Ollama (padrão: `llama3.2:1b`)
 - `--ollama <host>` — Host do servidor Ollama (padrão: `localhost`)
 - `--ollama-port <port>` — Porta do Ollama (padrão: `11434`)
 - `--json` — Ativa Grammar Restraint: força resposta em JSON estrito e injeta system prompt `"Responda estritamente em formato JSON válido."`
+- `--rag <dir>` — Ativa RAG: indexa diretório e injeta chunks relevantes no contexto
 
 ---
 
@@ -142,6 +166,7 @@ npm run dev -- chat "Give me JSON with name and age" --json
 npm run dev -- read package.json
 npm run dev -- search src "export"
 npm run dev -- exec "ls -la"
+npm run dev -- chat "Como instalar o projeto?" --rag .
 ```
 
 ---
@@ -169,6 +194,12 @@ Terminal (usuário)
 │FileReader││Command ││ OllamaProvider│
 │(FS ops)││Executor││ (HTTP Ollama)│
 └────────┘└────────┘└──────────────┘
+    │
+    ▼
+┌──────────────┐
+│  RAGManager  │  ← embeddings + busca semântica
+│(all-minilm)  │
+└──────────────┘
 ```
 
 ---
@@ -177,6 +208,7 @@ Terminal (usuário)
 
 - `CommandExecutor` usa `spawn` com `shell: false` — previne injeção de comandos shell
 - `FileReader` silencia erros em diretórios/arquivos sem permissão durante buscas recursivas
+- `RAGManager` só reindexa se houver mudanças (hash dos arquivos) — evita I/O desnecessário
 - Sem dependências externas em produção (apenas módulos nativos do Node.js)
 
 ---
@@ -259,13 +291,107 @@ npm run dev -- chat "Explique o que é SOLID" --model llama3.2:3b
 
 ---
 
+## 🔧 Tópico 12 — Retrieval-Augmented Generation (RAG)
+
+### Visão Geral
+
+O RAG (Retrieval-Augmented Generation) permite que o modelo responda perguntas com base no conteúdo real de arquivos do projeto. O pipeline funciona em 3 etapas:
+
+1. **Indexação:** arquivos `.ts`, `.js`, `.json`, `.md`, `.txt` são divididos em chunks de 512 caracteres (com overlap de 64) e cada chunk é convertido em um vetor de embedding 384-dim usando o modelo `all-minilm`
+2. **Busca semântica:** a pergunta do usuário é convertida no mesmo espaço vetorial. Usamos **cosine similarity** para encontrar os 5 chunks mais relevantes
+3. **Injeção no contexto:** os chunks são formatados como `[arquivo:linha]` e injetados no system prompt do modelo, que responde com base nesse contexto
+
+### Arquivo: `src/core/RAGManager.ts`
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                       RAGManager                                  │
+│                                                                   │
+│  + ensureIndex(dir): Promise<void>                                │
+│    └── percorre arquivos → chunk (512 chars, overlap 64)          │
+│    └── gera hash dos arquivos → detecta mudanças                  │
+│    └── só reindexa se houver modificação                          │
+│    └── salva cache em .soberano/index.json                        │
+│                                                                   │
+│  + retrieve(query, dir): Promise<SearchMatch[]>                   │
+│    └── gera embedding da query (all-minilm)                       │
+│    └── calcula cosine similarity contra todos os chunks           │
+│    └── retorna top 5 com score + arquivo + linha + conteúdo       │
+│                                                                   │
+│  + formatContext(matches): string                                 │
+│    └── formata como: "--- [arquivo:linha] ---\nconteúdo"          │
+│                                                                   │
+│  Interface SearchMatch:                                           │
+│    { file, line, content, score: number }                         │
+│                                                                   │
+│  Interface ChunkEntry (cache):                                    │
+│    { text, file, line, embedding: number[] }                      │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Pipeline RAG no comando `chat`
+
+```
+Usuário: "Como instalar o projeto?" --rag .
+
+1. RAGManager.ensureIndex(".")
+   └── indexa .ts, .js, .json, .md, .txt → chunks → embeddings → cache
+
+2. RAGManager.retrieve("Como instalar o projeto?", ".")
+   └── embedding da query → cosine similarity → top 5 chunks
+
+3. RAGManager.formatContext(top5)
+   └── "[DOCUMENTACAO_PROJETO.md:138] npm run dev -- chat..."
+
+4. System Prompt injetado:
+   ────────────────────────────────────────────
+   DOCUMENTOS RELEVANTES PARA A PERGUNTA:
+   [DOCUMENTACAO_PROJETO.md:138] npm run dev -- chat...
+   ...
+   ────────────────────────────────────────────
+
+5. Modelo responde com base nos documentos reais
+```
+
+### Mecanismos de robustez
+
+| Mecanismo | Descrição |
+|-----------|-----------|
+| Cache inteligente | `.soberano/index.json` armazena embeddings + hash dos arquivos. Reindexa apenas se houver mudanças |
+| DOCUMENTACAO_PROJETO.md prioritário | O arquivo de documentação é indexado primeiro, garantindo que esteja sempre presente |
+| Fallback silencioso | Se o embedding falhar ou diretório não existir, o chat continua sem contexto RAG |
+| Zero dependências | Embeddings usam `node:http` + `JSON.parse` — sem bibliotecas externas |
+| Chunking com overlap | 512 chars com 64 de overlap evita perda de contexto entre chunks |
+
+### Exemplo de uso
+
+```bash
+# Indexa o diretório atual e responde com base na documentação real
+npm run dev -- chat "Como instalar o projeto?" --rag .
+
+# Indexa um diretório específico
+npm run dev -- chat "Qual a estrutura do código?" --rag ./src
+
+# Funciona com ou sem --json (modo RAG puro ou ReAct + RAG)
+npm run dev -- chat "Explique a arquitetura" --rag . --json
+```
+
+### Requisitos
+
+- Modelo **all-minilm** instalado no Ollama (baixado automaticamente no primeiro uso)
+- Modelo de chat (ex: `llama3.2:1b`, `phi3:3b`) para gerar respostas
+- Diretório com arquivos de texto `.ts`, `.js`, `.json`, `.md`, `.txt`
+
+---
+
 ## 📌 Status Atual
 
 ✅ Projeto estruturalmente completo com:
 - Core funcional (leitura de arquivos, busca textual, execução de comandos)
 - **ToolRegistry** com 3 tools registradas (readFile, readDir, execute)
 - **ReAct Loop** — agente decide automaticamente quando usar ferramentas
-- Integração com Ollama via HTTP
+- **RAG (Retrieval-Augmented Generation)** — indexação de diretórios com embeddings + busca semântica + injeção de contexto
+- Integração com Ollama via HTTP (chat + embeddings)
 - CLI funcional com 6 comandos (read, dir, search, exec, chat, help)
 - Grammar Restraint / Structured Outputs — força modelos a responderem em JSON estrito via `--json`
 - Validação de robustez com `JSON.parse()` + `try/catch` para prevenir alucinações
@@ -281,3 +407,6 @@ npm run dev -- chat "Explique o que é SOLID" --model llama3.2:3b
 - Adicionar testes unitários com Vitest/Jest
 - Adicionar suporte a sessões/conversa com histórico (multi-turn)
 - Expandir ToolRegistry com mais ferramentas (writeFile, searchFiles, etc.)
+- Melhorar chunking com overlap adaptativo por estrutura (AST-aware)
+- Adicionar reranking multi-stage para melhorar precisão da busca
+- Suporte a PDF, DOCX e outros formatos no RAG

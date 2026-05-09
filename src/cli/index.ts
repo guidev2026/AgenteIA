@@ -120,6 +120,7 @@ Chat Flags:
   --ollama <host>                 Host do Ollama (padrão: localhost)
   --ollama-port <port>            Porta do Ollama (padrão: 11434)
   --json                          Ativa ReAct Loop + JSON estrito (Function Calling)
+  --rag <dir>                     Ativa RAG (Retrieval-Augmented Generation) com indexação do diretório
 
 ReAct Loop (com --json):
   O modelo tem acesso às ferramentas: readFile, readDir, execute.
@@ -129,6 +130,21 @@ ReAct Loop (com --json):
 
   ⚠️  Segurança: execute usa shell:false (sem injeção de comandos).
   ⚠️  Limite: 5 iterações no loop ReAct (evita loops infinitos).
+
+Retrieval-Augmented Generation (com --rag <dir>):
+  Indexa arquivos .ts, .js, .json, .md, .txt do diretório informado usando
+  all-minilm (embeddings 384-dim). Os chunks mais relevantes são injetados
+  no contexto do modelo para responder com base na documentação real.
+
+  Pipeline: chunking → embedding → cosine similarity → inject → respond
+
+  Exemplo: npm run dev -- chat "Como instalar o projeto?" --rag .
+  O modelo vai: indexar o diretório → buscar chunks relevantes →
+  usar como contexto → responder com base na documentação.
+
+  ⚠️  Requer all-minilm (instalado automaticamente com 'ollama pull').
+  ⚠️  Cache em .soberano/index.json (reindexa apenas se houver mudanças).
+  ⚠️  DOCUMENTACAO_PROJETO.md é sempre indexada como fonte prioritária.
 `);
     return;
   }

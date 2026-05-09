@@ -1,4 +1,4 @@
-import { FileReader, CommandExecutor, ToolRegistry } from '../core';
+import { FileReader, CommandExecutor, ToolRegistry, RAGManager } from '../core';
 import { OllamaProvider } from '../providers';
 
 /**
@@ -188,8 +188,32 @@ export async function runCommand(parsed: CliArgs): Promise<string> {
       const ollamaPort = Number(parsed.flags['ollama-port']) || 11434;
       // --json: ativa Grammar Restraint + ReAct Loop (tool use)
       const useJson = parsed.flags.json === true;
+      // --rag <path>: ativa Retrieval-Augmented Generation
+      const ragDir = parsed.flags.rag as string | undefined;
 
       const provider = new OllamaProvider(ollamaHost, ollamaPort);
+
+      // ── RAG (Retrieval-Augmented Generation) ──
+      // Se --rag foi passado, indexa o diretório e busca contexto
+      let ragContext = '';
+      if (ragDir) {
+        try {
+          const ragManager = new RAGManager(fileReader);
+          ragManager.connectProvider(provider);
+          console.error(`📚 Indexando ${ragDir}...`);
+          await ragManager.ensureIndex(ragDir);
+          console.error(`🔍 Buscando contexto relevante para: "${prompt}"`);
+          const matches = await ragManager.retrieve(prompt, ragDir);
+          ragContext = ragManager.formatContext(matches);
+          if (ragContext) {
+            console.error(`✅ ${matches.length} trechos relevantes encontrados (total: ~${ragContext.length} chars)`);
+          } else {
+            console.error('ℹ️ Nenhum trecho relevante encontrado.');
+          }
+        } catch (err: any) {
+          console.error(`⚠️ RAG error (continuando sem contexto): ${err.message}`);
+        }
+      }
 
       // ── ToolRegistry: registra as ferramentas disponíveis ──
       const toolRegistry = new ToolRegistry();
@@ -258,7 +282,7 @@ export async function runCommand(parsed: CliArgs): Promise<string> {
       const toolDefinitions = toolRegistry.getDefinitions();
       const toolNames = toolRegistry.getToolNames().join(', ');
 
-      const systemPrompt = [
+      const systemPromptParts = [
         'Você é um assistente com acesso a ferramentas para ler arquivos e executar comandos.',
         `Seu diretório de trabalho atual é: ${process.cwd()}`,
         'Use caminhos relativos a este diretório OU caminhos absolutos.',
@@ -267,6 +291,27 @@ export async function runCommand(parsed: CliArgs): Promise<string> {
         '',
         'Definições das ferramentas (JSON Schema):',
         toolDefinitions,
+      ];
+
+      // Injeta contexto RAG no system prompt, se houver
+      if (ragContext) {
+        systemPromptParts.push(
+          '',
+          '─'.repeat(60),
+          'DOCUMENTOS RELEVANTES PARA A PERGUNTA:',
+          '',
+          ragContext,
+          '',
+          '─'.repeat(60),
+          '',
+          'INSTRUÇÕES: Use os documentos acima como contexto para responder.',
+          'Se a resposta estiver nos documentos, cite a fonte ([arquivo:linha]).',
+          'Se não estiver nos documentos, use seu conhecimento geral.',
+          ''
+        );
+      }
+
+      systemPromptParts.push(
         '',
         'REGRAS DE RESPOSTA (ESCRITAS EM JSON):',
         '1. Se precisar usar uma ferramenta, responda APENAS com:',
@@ -277,7 +322,9 @@ export async function runCommand(parsed: CliArgs): Promise<string> {
         '4. NÃO invente informações — use as ferramentas para obter dados reais.',
         '',
         `Pergunta do usuário: ${prompt}`,
-      ].join('\n');
+      );
+
+      const systemPrompt = systemPromptParts.join('\n');
 
       // ── ReAct Loop ──
       const MAX_ITERATIONS = 5;

@@ -30,3 +30,6 @@ logs/
 
 # Outros
 coverage/
+
+# Cache RAG (índice de embeddings)
+.soberano/
