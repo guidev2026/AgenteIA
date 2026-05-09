@@ -44,7 +44,14 @@ AgenteIA/
 │   ├── providers/
 │   │   ├── index.ts            # Re-exports públicos do módulo providers
 │   │   ├── types.ts            # Interfaces: IProvider, IEmbedProvider, ChatRequest, etc.
-│   │   └── OllamaProvider.ts   # Cliente HTTP para Ollama (chat + embeddings)
+│   │   ├── OllamaProvider.ts   # Provider Ollama (chat + streamChat + embed)
+│   │   └── OllamaHttpClient.ts # Cliente HTTP de baixo nível (post + postStream)
+│   ├── cli/
+│   │   ├── strategies/         # Estratégias de chat (Strategy Pattern)
+│   │   │   ├── index.ts        # Re-exports
+│   │   │   ├── ChatStrategy.ts # Interface + buildSystemPrompt()
+│   │   │   ├── StreamStrategy.ts # Streaming direto (SSE)
+│   │   │   └── ReActStrategy.ts  # ReAct loop com ou sem streaming
 │   └── validation/
 │       └── JsonValidator.ts    # Validador JSON puro (SRP, zero dependências)
 ```
@@ -125,15 +132,58 @@ Implementação concreta do `IProvider` para comunicação com instância local 
 - Conexão com servidor Ollama em `host:port` configurável (padrão: `localhost:11434`)
 - Envio de prompts via POST para `/api/generate` com suporte a `temperature`, `num_predict`, `stream: false` e `format: "json"`
 - **Grammar Restraint nativo:** quando `format: 'json'` é ativado, o body inclui `"format": "json"` — o Ollama força o modelo a responder em JSON estrito
-- **Embeddings:** método `embed(request)` que envia POST para `/api/embeddings` com `keep_alive: "5m"` para reutilizar sessão do all-minilm
+- **Embeddings:** método `embed(request)` que envia POST para `/api/embed` com `keep_alive` configurável
 - **Vetores 384-dim:** retorna `number[]` (float32) padrão do modelo all-minilm
+- **Streaming SSE:** método `streamChat()` retorna `AsyncIterable<string>` que emite tokens um a um conforme chegam do servidor
 - **Validação de robustez:** se `format: 'json'` foi solicitado, a resposta é validada com `JSON.parse()` dentro de `try/catch`. Se o modelo alucinar JSON inválido, um erro claro é lançado protegendo o CLI
 - Timeout de 300 segundos para respostas de modelos grandes
 - Tratamento de erros de rede, parsing e status HTTP
 
+### OllamaHttpClient (`OllamaHttpClient.ts`)
+
+Cliente HTTP de baixo nível extraído do `OllamaProvider` (SRP — Single Responsibility Principle). Responsável exclusivamente por gerenciar conexões TCP, timeouts e parsing de respostas HTTP.
+
+**Métodos:**
+| Método | Descrição |
+|--------|-----------|
+| `post(path, body)` | POST comum — retorna Promise do JSON parseado |
+| `postStream(path, body)` | POST com streaming — retorna `AsyncGenerator<string>` que processa chunks TCP linha a linha |
+
+**Fluxo do `postStream`:**
+1. Conecta via `http.request`
+2. Aguarda `req.on('response')` em vez de callback (para suportar async generator)
+3. Processa chunks TCP linha a linha com buffer de linha parcial
+4. Cada linha completa é parseada como JSON e extrai o campo `"response"`
+5. O loop termina ao receber um objeto com `"done": true`
+
+Zero dependências externas — usa exclusivamente `node:http`.
+
 ---
 
 ## 🖥️ CLI (`src/cli/`)
+
+### Estratégias de Chat (`src/cli/strategies/`)
+
+O comando `chat` usa o **Strategy Pattern** (OCP) para suportar múltiplos pipelines de execução:
+
+| Estratégia | Arquivo | Quando usada |
+|------------|---------|--------------|
+| `StreamStrategy` | `StreamStrategy.ts` | `--stream` ativo, `--json` desligado, e provider suporta `streamChat` |
+| `ReActStrategy` | `ReActStrategy.ts` | Padrão (fallback) — quando `--json` está ativo ou streaming não é suportado |
+
+**StreamStrategy** — Streaming direto (efeito máquina de escrever):
+1. Constrói system prompt completo (com RAG se `--rag`)
+2. Itera sobre `provider.streamChat()` escrevendo cada token em `process.stdout`
+3. Se `streamChat` falhar, faz fallback para `chat()` normal
+4. Exibe `[modelo]` como prefixo da resposta
+
+**ReActStrategy** — ReAct Loop (Reasoning + Acting):
+1. Constrói system prompt completo (RAG + tools)
+2. Executa `ReActLoop.execute()` — loop de raciocínio com ferramentas
+3. Se `--stream` estiver ativo, faz streaming da resposta final pós-ReAct
+4. Exibe indicador `🤔 Pensando...` no stderr (desativável com `--no-think`)
+5. Se streaming falhar, mostra resposta completa de uma vez
+
 
 Interface de linha de comando que orquestra Core + Providers.
 
@@ -407,13 +457,14 @@ A suíte de testes usa **Vitest** (v4.1.5) e está organizada em `tests/unit/`, 
 |--------|---------|--------|-------------|
 | **Core** | `tests/unit/core/ToolRegistry.test.ts` | 9 | Registro de tools, execução com/sem parâmetros, validação de existência |
 | **Core** | `tests/unit/core/CommandExecutor.test.ts` | 3 | Execução de comandos, captura stderr, erro de spawn |
-| **Providers** | `tests/unit/providers/OllamaProvider.test.ts` | 7 | Chat com parâmetros, format=json (Grammar Restraint), erro HTTP, embed |
+| **Providers** | `tests/unit/providers/OllamaProvider.test.ts` | 17 | Chat com parâmetros, format=json, erro HTTP, embed. **Streaming:** tokens individuais, body com stream:true, erro HTTP no stream, linhas vazias/não-JSON, chunks TCP quebrados |
 | **RAG** | `tests/unit/rag/Retriever.test.ts` | 13 | Cosine similarity, rankeamento, ordenação, busca vazia |
 | **RAG** | `tests/unit/rag/ReActLoop.test.ts` | 14 | **Text Mode:** ACTION/FINAL_ANSWER, limite 5 iterações, erro em ACTION, build de prompt, modelo padrão. **JSON Mode:** final_response direta, tool_call → ferramenta → final_response, detecção de loop repetido, fallback text mode, resposta não-JSON, formato desconhecido, erro em ferramenta, esgotamento de iterações |
 | **RAG** | `tests/unit/rag/Chunker.test.ts` | 8 | Chunking por parágrafo, sentença, overlap, limite de chunks |
 | **Validation** | `tests/unit/validation/JsonValidator.test.ts` | 13 | validate(), tryValidate(), ValidationError |
+| **CLI** | `tests/unit/cli/commands.test.ts` | 15 | Comandos read/dir/search/exec/chat, flags --stream/--json/--no-think, fallback streaming direto, erro de comando faltando |
 
-**Total: 67 testes, todos passando.**
+**Total: 92 testes, todos passando.**
 
 ### Estratégia de Mocks (zero I/O real)
 
@@ -460,10 +511,10 @@ npx vitest            # Modo watch (recarrega automático)
 - Zero dependências externas em produção (apenas `node:http`, `node:fs/promises`, `node:child_process`)
 - TypeScript configurado com strict mode
 - ✅ **SOLID implementado** — SRP (classes coesas), OCP (ProviderFactory), LSP (IProvider), ISP (interfaces enxutas), DIP (AppContext + injeção de dependências)
-- ✅ **67 testes unitários** passando com Vitest (7 arquivos: ToolRegistry, CommandExecutor, OllamaProvider, Retriever, ReActLoop, Chunker, JsonValidator)
+- ✅ **92 testes unitários** passando com Vitest (8 arquivos: ToolRegistry, CommandExecutor, OllamaProvider, Retriever, ReActLoop, Chunker, JsonValidator, commands)
 
 📝 **Possíveis próximos passos (não implementados):**
-- Adicionar streaming de respostas do Ollama (SSE)
+- [já implementado] ~~Adicionar streaming de respostas do Ollama (SSE)~~
 - Implementar novos providers (OpenAI, Anthropic, etc.)
 - Adicionar suporte a sessões/conversa com histórico (multi-turn)
 - Expandir ToolRegistry com mais ferramentas (writeFile, searchFiles, etc.)

@@ -24,30 +24,58 @@ vi.mock('node:http', () => {
     const path = options.path || '/api/generate';
     const mock = mockResponses.get(path) || { status: 200, data: '{}' };
 
-    // Simula IncomingMessage
-    const res = {
+    // Simula IncomingMessage — emite dados como string (não Buffer)
+    const res: any = {
       statusCode: mock.status,
+      closed: false,
+      destroyed: false,
       on: (event: string, handler: any) => {
         if (event === 'data') {
-          // Emite os dados como Buffer (simula resposta HTTP real)
-          setImmediate(() => handler(Buffer.from(mock.data)));
+          setTimeout(() => handler(mock.data), 0);
         }
-        if (event === 'end') {
-          setImmediate(() => handler());
+        if (event === 'end' || event === 'close') {
+          setTimeout(() => handler(), 0);
         }
         return res;
       },
+      // Iterator assíncrono para for await...of (postStream)
+      [Symbol.asyncIterator]: () => {
+        let emitted = false;
+        return {
+          next: () => {
+            if (emitted) return Promise.resolve({ value: undefined, done: true });
+            emitted = true;
+            return new Promise((resolve) => {
+              setTimeout(() => {
+                resolve({ value: mock.data, done: false });
+              }, 0);
+            });
+          },
+        };
+      },
     };
 
-    if (callback) setImmediate(() => callback(res));
+    // Se callback foi passado (modo post tradicional), chama direto
+    if (callback) {
+      setTimeout(() => callback(res), 0);
+    }
 
-    return {
-      on: (_event: string, _handler: any) => {},
+    // Objeto req com suporte a req.on('response') usado pelo postStream
+    const req: any = {
+      on: (_event: string, handler: any) => {
+        // postStream usa req.on('response') em vez de callback
+        if (_event === 'response' && !callback) {
+          setTimeout(() => handler(res), 0);
+        }
+        return req;
+      },
       setTimeout: (_ms: number, _handler: any) => {},
       write: (body: string) => { lastRequestBody = body; },
       end: () => {},
       destroy: () => {},
     };
+
+    return req;
   };
 
   return { default: { request }, request };
@@ -131,6 +159,119 @@ describe('OllamaProvider.chat()', () => {
     await provider.chat({ model: 'phi3', prompt: 'test' });
 
     expect(lastRequestBody).toContain('"temperature":0.7');
+  });
+});
+
+describe('OllamaProvider.streamChat()', () => {
+  let provider: OllamaProvider;
+
+  beforeEach(() => {
+    mockResponses.clear();
+    lastRequestBody = '';
+    provider = new OllamaProvider();
+  });
+
+  it('emite tokens individualmente conforme chegam do servidor', async () => {
+    const tokens: string[] = [];
+    mockResponses.set('/api/generate', {
+      status: 200,
+      data: [
+        JSON.stringify({ response: 'Olá', done: false }),
+        '\n',
+        JSON.stringify({ response: ' Mundo', done: false }),
+        '\n',
+        JSON.stringify({ response: '!', done: true }),
+        '\n',
+      ].join(''),
+    });
+
+    for await (const token of provider.streamChat({
+      model: 'phi3:3b',
+      prompt: 'Teste streaming',
+    })) {
+      tokens.push(token);
+    }
+
+    expect(tokens).toEqual(['Olá', ' Mundo', '!']);
+  });
+
+  it('monta body com stream:true', async () => {
+    mockResponses.set('/api/generate', {
+      status: 200,
+      data: JSON.stringify({ response: 'ok', done: true }) + '\n',
+    });
+
+    for await (const _ of provider.streamChat({
+      model: 'phi3:3b',
+      prompt: 'test',
+    })) {
+      // Consome o generator
+    }
+
+    const body = JSON.parse(lastRequestBody);
+    expect(body.stream).toBe(true);
+    expect(body.model).toBe('phi3:3b');
+    expect(body.prompt).toBe('test');
+  });
+
+  it('lança erro no streaming se servidor retorna status não-200', async () => {
+    mockResponses.set('/api/generate', {
+      status: 500,
+      data: 'Server Error',
+    });
+
+    const iterator = provider.streamChat({
+      model: 'phi3:3b',
+      prompt: 'test',
+    })[Symbol.asyncIterator]();
+
+    await expect(iterator.next()).rejects.toThrow(/Ollama error 500/);
+  });
+
+  it('pula linhas vazias ou não-JSON no stream', async () => {
+    const tokens: string[] = [];
+    mockResponses.set('/api/generate', {
+      status: 200,
+      data: [
+        '',                       // vazia (ignora)
+        '\n',                     // linha em branco
+        JSON.stringify({ response: 'Token1', done: false }),
+        '\n',
+        'not json line\n',        // não-JSON (ignora)
+        JSON.stringify({ response: 'Token2', done: true }),
+        '\n',
+      ].join(''),
+    });
+
+    for await (const token of provider.streamChat({
+      model: 'phi3:3b',
+      prompt: 'test',
+    })) {
+      tokens.push(token);
+    }
+
+    expect(tokens).toEqual(['Token1', 'Token2']);
+  });
+
+  it('trata chunks TCP quebrados (parcialmente recebidos)', async () => {
+    const tokens: string[] = [];
+    mockResponses.set('/api/generate', {
+      status: 200,
+      data: [
+        '{"response":"Hel',
+        'lo","done":false}\n',
+        '{"response":" World","done":true}\n',
+      ].join(''),
+    });
+
+    for await (const token of provider.streamChat({
+      model: 'phi3:3b',
+      prompt: 'test',
+    })) {
+      tokens.push(token);
+    }
+
+    expect(tokens).toEqual(['Hello', ' World']);
   });
 });
 

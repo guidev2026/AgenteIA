@@ -45,6 +45,12 @@ export interface IProvider {
    * podem deixar sem implementação.
    */
   embed?(text: string, embedModel?: string, keepAlive?: string): Promise<number[]>;
+  /**
+   * Streaming: retorna tokens incrementalmente via AsyncIterable.
+   * Opcional — providers que não suportam streaming ou modo legado
+   * podem deixar sem implementação (fallback para chat()).
+   */
+  streamChat?(request: ChatRequest): AsyncIterable<string>;
 }
 
 /**
