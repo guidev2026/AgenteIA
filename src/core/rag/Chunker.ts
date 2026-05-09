@@ -1,25 +1,22 @@
 /**
- * Chunker: Responsável apenas por dividir textos em chunks (SRP).
+ * Chunker: Responsável apenas por dividir textos em chunks textuais (SRP).
  *
  * Estratégias de chunking:
  * - Por parágrafo (\n\n): divisão semântica padrão
  * - Por sentença (. ? !): fallback para parágrafos longos
  * - Com overlap entre chunks consecutivos
  *
+ * Implementa IChunker — funciona como fallback textual para o ASTChunkerService.
  * É uma função pura — sem estado, sem I/O. Ideal para testes.
  */
+
+import type { IChunker, ChunkResult } from './IChunker';
 
 const MAX_CHUNK_SIZE = 2000;        // caracteres (~500 tokens)
 const OVERLAP = 200;                 // sobreposição entre chunks
 const MAX_CHUNKS_PER_FILE = 50;     // limite por arquivo
 
-export interface ChunkResult {
-  text: string;
-  startLine: number;
-  endLine: number;
-}
-
-export class Chunker {
+export class Chunker implements IChunker {
   /**
    * Divide o conteúdo de um arquivo em chunks semanticamente coerentes.
    *
@@ -31,9 +28,10 @@ export class Chunker {
    * 5. Respeita MAX_CHUNKS_PER_FILE
    *
    * @param content Conteúdo completo do arquivo
+   * @param _filePath Caminho do arquivo (ignorado — chunking sempre textual)
    * @returns Array de chunks com metadados de linha
    */
-  chunk(content: string): ChunkResult[] {
+  chunk(content: string, _filePath?: string): ChunkResult[] {
     const chunks: ChunkResult[] = [];
     const paragraphs = content.split('\n\n');
     let currentLine = 1;

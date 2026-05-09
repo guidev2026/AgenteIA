@@ -1,5 +1,9 @@
 export { Chunker } from './Chunker';
-export type { ChunkResult } from './Chunker';
+export type { ChunkResult } from './IChunker';
+export { IChunker } from './IChunker';
+export { IASTParser, ASTNode } from './IASTParser';
+export { TypescriptASTAdapter } from './TypescriptASTAdapter';
+export { ASTChunkerService } from './ASTChunkerService';
 export { Embedder } from './Embedder';
 export { VectorStore } from './VectorStore';
 export type { ChunkEntry } from './VectorStore';

@@ -28,7 +28,7 @@ export type { AppContextConfig } from './AppContext';
 // Pipeline RAG
 export { RAGManager } from './rag/RAGManager';
 export { Chunker } from './rag/Chunker';
-export type { ChunkResult } from './rag/Chunker';
+export type { ChunkResult } from './rag/IChunker';
 export { Embedder } from './rag/Embedder';
 export { VectorStore } from './rag/VectorStore';
 export type { ChunkEntry } from './rag/VectorStore';

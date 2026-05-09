@@ -16,6 +16,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { FileReader } from '../FileReader';
 import { Chunker } from './Chunker';
+import type { IChunker } from './IChunker';
 import { Embedder } from './Embedder';
 import { VectorStore } from './VectorStore';
 import { Retriever } from './Retriever';
@@ -32,14 +33,14 @@ const TEXT_EXTENSIONS = new Set([
 
 export class RAGManager {
   private readonly fileReader: FileReader;
-  private readonly chunker: Chunker;
+  private readonly chunker: IChunker;
   private readonly embedder: Embedder;
   private readonly vectorStore: VectorStore;
   private readonly retriever: Retriever;
 
   constructor(
     fileReader: FileReader,
-    chunker: Chunker,
+    chunker: IChunker,
     embedder: Embedder,
     vectorStore: VectorStore,
     retriever: Retriever
@@ -59,12 +60,12 @@ export class RAGManager {
    * @param fileReader FileReader para ler arquivos
    * @param embedProvider Provider de embeddings (ex: OllamaProvider)
    */
-  static create(fileReader: FileReader, embedProvider: IEmbedProvider): RAGManager {
-    const chunker = new Chunker();
+  static create(fileReader: FileReader, embedProvider: IEmbedProvider, chunker?: IChunker): RAGManager {
+    const effectiveChunker = chunker ?? new Chunker();
     const embedder = new Embedder(embedProvider);
     const vectorStore = new VectorStore();
     const retriever = new Retriever();
-    return new RAGManager(fileReader, chunker, embedder, vectorStore, retriever);
+    return new RAGManager(fileReader, effectiveChunker, embedder, vectorStore, retriever);
   }
 
   /**
