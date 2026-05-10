@@ -877,7 +877,7 @@ A suíte de testes usa **Vitest** (v4.1.5) e está organizada em `tests/unit/`, 
 | **Validation** | `tests/unit/validation/JsonValidator.test.ts` | 13 | validate(), tryValidate(), ValidationError |
 | **CLI** | `tests/unit/cli/commands.test.ts` | 15 | Comandos read/dir/search/exec/chat, flags --stream/--json/--no-think, fallback streaming direto, erro de comando faltando |
 
-**Total: 235 testes, todos passando.**
+**Total: 308 testes, todos passando.**
 
 ### Estratégia de Mocks (zero I/O real)
 
@@ -924,7 +924,7 @@ npx vitest            # Modo watch (recarrega automático)
 - Zero dependências externas em produção (apenas `node:http`, `node:fs/promises`, `node:child_process`)
 - TypeScript configurado com strict mode
 - ✅ **SOLID implementado** — SRP (classes coesas), OCP (ProviderFactory), LSP (IProvider), ISP (interfaces enxutas), DIP (AppContext + injeção de dependências)
-- ✅ **235 testes unitários** passando com Vitest (18 arquivos de teste: ToolRegistry, CommandExecutor, Reflector, ErrorJournal, SessionStore, SessionManager, OllamaProvider, Retriever, ReActLoop, Chunker, TypescriptASTAdapter, ASTChunkerService, JsonValidator, commands, JsonGraphStore, ASTRelationshipExtractor, GraphBuilder, GraphRAGManager)
+- ✅ **308 testes unitários** passando com Vitest (25 arquivos de teste: ToolRegistry, CommandExecutor, Reflector, ErrorJournal, SessionStore, SessionManager, OllamaProvider, Retriever, ReActLoop, Chunker, TypescriptASTAdapter, ASTChunkerService, JsonValidator, commands, JsonGraphStore, ASTRelationshipExtractor, GraphBuilder, GraphRAGManager, ChatStrategy, ASTEditor, SearchReplaceEditor, TokenEstimator, StatefulCompressor, IContextCompressor, GraphRAGManager)
 
 📝 **Possíveis próximos passos (não implementados):**
 - [já implementado] ~~Adicionar streaming de respostas do Ollama (SSE)~~

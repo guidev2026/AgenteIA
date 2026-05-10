@@ -70,10 +70,24 @@ export class AppContext {
     const store = new SessionStore();
     this.sessionManager = new SessionManager(store);
 
-    // Carrega sessão existente ou cria nova (de forma síncrona para o construtor)
-    this.initSession(config.sessionId, config.newSession).catch((err) => {
-      console.error('[AppContext] Falha ao inicializar sessão:', err);
-    });
+    // NOTA: initSession NÃO é chamado aqui no construtor para evitar race condition.
+    // Chame app.initialize() após construir o AppContext para carregar/criar a sessão.
+  }
+
+  /**
+   * Inicializa a sessão de conversa (carrega existente ou cria nova).
+   *
+   * Deve ser chamado após a construção do AppContext, antes de usar o sessionManager.
+   * Separar do construtor evita race condition entre initSession() assíncrono
+   * e addMessage() síncrono.
+   *
+   * @param config Configuração original passada no construtor
+   */
+  async initialize(config?: AppContextConfig): Promise<void> {
+    const sessionId = config?.sessionId;
+    const newSession = config?.newSession;
+    if (!sessionId && !newSession) return; // Nada a inicializar
+    await this.initSession(sessionId, newSession);
   }
 
   private async initSession(sessionId?: string, newSession?: boolean): Promise<void> {

@@ -91,6 +91,7 @@ const { mockState, mockProvider, MockAppContext, MockStreamStrategy, MockReActSt
       get ragDir() { return ms.ragDir; }
       get sessionManager() { return mockSM; }
       getSessionHistory() { return []; }
+      initialize() { return Promise.resolve(); }
     }
 
     class MockStrat {

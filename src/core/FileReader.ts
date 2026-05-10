@@ -90,8 +90,9 @@ export class FileReader {
     maxResults: number = 100
   ): Promise<SearchResult[]> {
     const results: SearchResult[] = [];
-    // Converte string em RegExp global — cada linha é testada individualmente
-    const regex = typeof pattern === 'string' ? new RegExp(pattern, 'g') : pattern;
+    // Converte string em RegExp — cada linha é testada individualmente.
+    // Sem flag 'g' para evitar falsos negativos por lastIndex (RegExp global mantém estado interno).
+    const regex = typeof pattern === 'string' ? new RegExp(pattern) : pattern;
 
     /**
      * Função interna recursiva que percorre a árvore de diretórios.

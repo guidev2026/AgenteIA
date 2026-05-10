@@ -2,7 +2,7 @@
  * commands.ts — Roteador de comandos CLI com Injeção de Dependência (DIP).
  *
  * Fluxo:
- *   parseArgs (index.ts) → CliArgs → buildContext() → AppContext
+ *   parseArgs (index.ts) → CliArgs → buildConfig() → AppContext
  *   ↓
  *   runCommand() usa AppContext para acessar:
  *     - fileReader, commandExecutor, provider, toolRegistry
@@ -35,18 +35,18 @@ export interface CliArgs {
 }
 
 /**
- * Cria o AppContext (container DI) a partir dos argumentos CLI parseados.
+ * Constrói a configuração do AppContext a partir dos argumentos CLI parseados.
  *
  * DIP (Dependency Inversion Principle):
  * - AppContext gerencia a criação e injeção de TODAS as dependências.
  * - O comando não instancia diretamente providers, readers ou executors.
- * - Basta mudar o AppContextConfig para trocar de provider ou config.
+ * - Basta mudar a config para trocar de provider ou config.
  *
  * Flags de sessão:
  *   --session <id>    → carrega uma sessão existente pelo UUID
  *   --new-session     → força a criação de uma nova sessão (ignora --session)
  */
-function buildContext(parsed: CliArgs): AppContext {
+function buildConfig(parsed: CliArgs): import('../core').AppContextConfig {
   const model = (parsed.flags.model as string) || 'llama3.2:1b';
   const ollamaHost = (parsed.flags.ollama as string) || 'localhost';
   const ollamaPort = Number(parsed.flags['ollama-port']) || 11434;
@@ -55,7 +55,7 @@ function buildContext(parsed: CliArgs): AppContext {
   const sessionId = parsed.flags.session as string | undefined;
   const newSession = parsed.flags['new-session'] === true;
 
-  return new AppContext({
+  return {
     provider: {
       type: 'ollama',
       host: ollamaHost,
@@ -66,15 +66,21 @@ function buildContext(parsed: CliArgs): AppContext {
     ragDir,
     sessionId,
     newSession,
-  });
+  };
 }
 
 // Cache do contexto — construído uma vez por execução CLI
 let ctx: AppContext | null = null;
 
-function getContext(parsed: CliArgs): AppContext {
+/**
+ * Obtém (ou cria) o AppContext e garante que a sessão foi inicializada.
+ * Agora assíncrono porque app.initialize() pode carregar sessão do disco.
+ */
+async function getContext(parsed: CliArgs): Promise<AppContext> {
   if (!ctx) {
-    ctx = buildContext(parsed);
+    const config = buildConfig(parsed);
+    ctx = new AppContext(config);
+    await ctx.initialize(config);
   }
   return ctx;
 }
@@ -98,7 +104,7 @@ function getContext(parsed: CliArgs): AppContext {
  * @returns String formatada para exibição no terminal
  */
 export async function runCommand(parsed: CliArgs): Promise<string> {
-  const app = getContext(parsed);
+  const app = await getContext(parsed);
 
   switch (parsed.command) {
     /**
