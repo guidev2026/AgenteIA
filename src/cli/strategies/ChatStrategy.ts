@@ -77,6 +77,7 @@ export async function buildSystemPrompt(
   // ── System Prompt ──
   const toolDefinitions = toolRegistry.getDefinitions();
   const toolNames = toolRegistry.getToolNames().join(', ');
+  const toolNameList = toolRegistry.getToolNames();
 
   const systemPromptParts: string[] = [
     'Você é um assistente com acesso a ferramentas para ler arquivos e executar comandos.',
@@ -88,6 +89,22 @@ export async function buildSystemPrompt(
     'Definições das ferramentas (JSON Schema):',
     toolDefinitions,
   ];
+
+  // ── Bloco condicional de workflow de edição ──
+  const hasEditTools = toolNameList.includes('editSymbol') || toolNameList.includes('searchReplace');
+  if (hasEditTools) {
+    systemPromptParts.push(
+      '',
+      'WORKFLOW DE EDIÇÃO:',
+      '1. NUNCA reescreva um arquivo inteiro — edite apenas os trechos necessários.',
+      '2. Antes de editar, use readFileForEdit para ver o conteúdo atual numerado.',
+      '3. Para TypeScript (.ts): prefira editSymbol (substitui por nome do símbolo).',
+      '4. Para outros formatos: use searchReplace (cópia exata do código, com indentação).',
+      '5. Se searchReplace retornar BLOCK_NOT_FOUND, chame readFileForEdit novamente',
+      '   e tente com um bloco menor e mais específico.',
+      ''
+    );
+  }
 
   // Injeta contexto RAG no system prompt, se houver
   if (ragContext) {

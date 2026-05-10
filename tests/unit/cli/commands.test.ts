@@ -51,8 +51,9 @@ const { mockState, mockProvider, MockAppContext, MockStreamStrategy, MockReActSt
         execute: () => Promise.resolve({ stdout: 'command output', stderr: '' }),
       },
       toolRegistry: {
-        getToolNames: () => ['read', 'search'],
+        getToolNames: () => ['read', 'search', 'editSymbol', 'searchReplace', 'readFileForEdit'],
         getDefinitions: () => '[{"name":"read","description":"Read file"}]',
+        execute: vi.fn(),
       },
       provider: mp,
       embedProvider: { chat: () => Promise.resolve({ response: '' }) },

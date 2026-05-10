@@ -1,8 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { ReActLoop } from '../../../src/core/rag/ReActLoop';
+import { ReActLoop, type ReActMessage } from '../../../src/core/rag/ReActLoop';
 import { CommandExecutor } from '../../../src/core/CommandExecutor';
 import { ToolRegistry } from '../../../src/core/ToolRegistry';
 import type { IProvider } from '../../../src/providers/types';
+import type { IContextCompressor, CompressedContext } from '../../../src/core/IContextCompressor';
+import { assessCompressionNeed, CompressionTrigger } from '../../../src/core/IContextCompressor';
+import { TokenEstimator } from '../../../src/core/TokenEstimator';
 
 /**
  * Testes unitários para ReActLoop.
@@ -651,5 +654,177 @@ describe('ReActLoop.execute() — Com Reflector (self-correction)', () => {
     );
 
     expect(reflector.reflect).toHaveBeenCalled();
+  });
+});
+
+// ── Suite de testes: Compressão de Contexto ──
+
+describe('ReActLoop.execute() — Com IContextCompressor', () => {
+  let provider: IProvider;
+  let executor: CommandExecutor;
+    let mockCompressor: IContextCompressor;
+
+  /**
+   * Cria um compressor mock que retorna um CompressedContext previsível.
+   */
+  function createMockCompressor(): IContextCompressor {
+    return {
+      compress: vi.fn().mockImplementation(
+        async (history: ReActMessage[], _model: string, _systemPrompt: string): Promise<CompressedContext> => {
+          const keptMessages = history.slice(-3);
+          const originalLength = history.reduce((acc: number, msg: ReActMessage) => acc + msg.content.length, 0);
+          const workingMemory = '[Compressed] sumário do histórico';
+          const compressedLength = workingMemory.length;
+          const compressionRatio = originalLength > 0
+            ? Math.max(0, 1.0 - compressedLength / originalLength)
+            : 1.0;
+          return {
+            workingMemory,
+            keptMessages,
+            compressionRatio,
+          };
+        }
+      ),
+    };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    provider = createMockProvider(['FINAL_ANSWER: resposta comprimida']);
+    executor = createMockExecutor();
+    mockCompressor = createMockCompressor();
+  });
+
+  it('sem compressor injetado → executa normalmente (compatibilidade retroativa)', async () => {
+    const loop = new ReActLoop(provider, executor);
+    const result = await loop.execute(
+      'Seja útil',
+      [{ role: 'user', content: 'teste' }],
+      'phi3:3b',
+    );
+    expect(result.finalAnswer).toContain('FINAL_ANSWER');
+    expect(result.wasCompressed).toBe(false);
+    expect(result.compressionRatio).toBeUndefined();
+  });
+
+  it('histórico curto (abaixo de 70%) → compressor não é chamado', async () => {
+    // Com tinyllama:1b (limit=4096), 70% = ~2867 tokens ≈ ~11468 chars
+    // Um histórico curto de ~10 mensagens curtas fica bem abaixo disso
+    const shortHistory = Array.from({ length: 5 }, (_, i) => ({
+      role: 'user' as const,
+      content: `mensagem curta ${i}`,
+    }));
+
+    const loop = new ReActLoop(provider, executor, undefined, undefined, mockCompressor);
+
+    const result = await loop.execute(
+      'Seja breve', // systemPrompt pequeno
+      shortHistory,
+      'tinyllama:1b',
+    );
+
+    expect(result.finalAnswer).toContain('FINAL_ANSWER');
+    expect(mockCompressor.compress).not.toHaveBeenCalled();
+    expect(result.wasCompressed).toBe(false);
+    expect(result.compressionRatio).toBeUndefined();
+  });
+
+  it('histórico longo (>70%) → compressor é chamado antes da primeira iteração', async () => {
+    // tinyllama:1b tem limit=4096. 70% = 2867 tokens ≈ 11468 chars
+    // Criar um histórico longo o suficiente para estourar 70%
+    // Cada mensagem: role + content ≈ 200 chars → ~50 tokens cada
+    // 2900 tokens / 50 tokens/msg ≈ 58 mensagens
+    // systemPrompt também conta, então vamos usar 60 mensagens de ~230 chars cada
+    const longMessageContent = 'A'.repeat(230);
+    const longHistory = Array.from({ length: 60 }, (_, i) => ({
+      role: 'user' as const,
+      content: `${longMessageContent} ${i}`,
+    }));
+
+    const loop = new ReActLoop(provider, executor, undefined, undefined, mockCompressor);
+
+    const result = await loop.execute(
+      'Seja um assistente útil e responda com precisão',
+      longHistory,
+      'tinyllama:1b',
+    );
+
+    expect(mockCompressor.compress).toHaveBeenCalledTimes(1);
+    expect(result.wasCompressed).toBe(true);
+    expect(result.compressionRatio).toBeGreaterThanOrEqual(0);
+  });
+
+  it('compressão injeta workingMemory como mensagem system no início do array', async () => {
+    const longMessageContent = 'B'.repeat(300);
+    const longHistory = Array.from({ length: 50 }, (_, i) => ({
+      role: 'user' as const,
+      content: `${longMessageContent} ${i}`,
+    }));
+
+    // Spy no compress para verificar argumentos
+    const compressSpy = vi.fn().mockResolvedValue({
+      workingMemory: '[Compressed working memory]',
+      keptMessages: longHistory.slice(-3),
+      compressionRatio: 0.85,
+    });
+    const spyCompressor: IContextCompressor = { compress: compressSpy };
+
+    const loop = new ReActLoop(provider, executor, undefined, undefined, spyCompressor);
+
+    const result = await loop.execute(
+      'Seja útil',
+      longHistory,
+      'tinyllama:1b',
+    );
+
+    expect(compressSpy).toHaveBeenCalledWith(longHistory, 'tinyllama:1b', 'Seja útil');
+    expect(result.wasCompressed).toBe(true);
+    // O resultado deve conter FINAL_ANSWER (provido pelo mock)
+    expect(result.finalAnswer).toContain('FINAL_ANSWER');
+  });
+
+  it('ReActResult contém wasCompressed true e compressionRatio quando compressão ocorre', async () => {
+    const longMessageContent = 'C'.repeat(300);
+    const longHistory = Array.from({ length: 50 }, (_, i) => ({
+      role: 'user' as const,
+      content: `${longMessageContent} ${i}`,
+    }));
+
+    const loop = new ReActLoop(provider, executor, undefined, undefined, mockCompressor);
+
+    const result = await loop.execute(
+      'Sistema de teste',
+      longHistory,
+      'tinyllama:1b',
+    );
+
+    expect(result.wasCompressed).toBe(true);
+    expect(typeof result.compressionRatio).toBe('number');
+    expect(result.compressionRatio).toBeGreaterThanOrEqual(0);
+    expect(result.compressionRatio).toBeLessThanOrEqual(1);
+    expect(result.finalAnswer).toContain('FINAL_ANSWER');
+  });
+
+  it('Logs de compressão no stderr quando compressão ocorre', async () => {
+    const longMessageContent = 'D'.repeat(300);
+    const longHistory = Array.from({ length: 50 }, (_, i) => ({
+      role: 'user' as const,
+      content: `${longMessageContent} ${i}`,
+    }));
+
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const loop = new ReActLoop(provider, executor, undefined, undefined, mockCompressor);
+
+    await loop.execute(
+      'Sistema de teste',
+      longHistory,
+      'tinyllama:1b',
+    );
+
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      expect.stringMatching(/\[ReActLoop\] Context compressed at (SOFT|HARD) trigger\./),
+    );
+    consoleErrorSpy.mockRestore();
   });
 });

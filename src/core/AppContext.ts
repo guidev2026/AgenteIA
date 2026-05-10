@@ -25,6 +25,8 @@ import type { ProviderConfig } from './ProviderFactory';
 import { SessionManager } from './SessionManager';
 import { SessionStore } from './SessionStore';
 import type { ReActMessage } from './rag/ReActLoop';
+import { ASTEditor } from './ASTEditor';
+import { SearchReplaceEditor } from './SearchReplaceEditor';
 
 export interface AppContextConfig {
   provider: ProviderConfig;
@@ -143,6 +145,79 @@ export class AppContext {
             : [];
         const result = await executor.execute(cmd, cmdArgs);
         return result.stdout || result.stderr || '(no output)';
+      }
+    );
+
+    // Tool: editSymbol — edição estrutural de símbolos TypeScript via AST
+    this.toolRegistry.register(
+      'editSymbol',
+      'Replace a top-level symbol (function, class, interface, variable) in a TypeScript file by name. The symbol must exist in the file. Returns a confirmation with the symbol name and file path on success.',
+      {
+        filePath: { type: 'string', description: 'Absolute or relative path to the .ts file' },
+        symbolName: { type: 'string', description: 'Name of the top-level symbol to replace' },
+        newCode: { type: 'string', description: 'Complete new source code for the symbol' },
+      },
+      async (args) => {
+        const filePath = args.filePath as string;
+        const symbolName = args.symbolName as string;
+        const newCode = args.newCode as string;
+        const astEditor = new ASTEditor(reader);
+        const result = await astEditor.replaceSymbol(filePath, symbolName, newCode);
+        if (!result.success) {
+          throw new Error(
+            `editSymbol failed for symbol "${symbolName}" in "${filePath}": ${result.error}`
+          );
+        }
+        return `OK: Symbol "${symbolName}" in "${filePath}" has been replaced successfully.`;
+      }
+    );
+
+    // Tool: searchReplace — edição textual por bloco exato com normalização
+    this.toolRegistry.register(
+      'searchReplace',
+      'Replace an exact block of text in any file. The search block is normalized (CRLF→LF, trailing whitespace removed) before matching, so small whitespace differences are tolerated. Indentation IS significant and must match exactly. Returns the full file path on success.',
+      {
+        filePath: { type: 'string', description: 'Absolute or relative path to the file' },
+        searchBlock: { type: 'string', description: 'Exact block of text to find (indentation sensitive)' },
+        replaceBlock: { type: 'string', description: 'New block of text to replace with' },
+      },
+      async (args) => {
+        const filePath = args.filePath as string;
+        const searchBlock = args.searchBlock as string;
+        const replaceBlock = args.replaceBlock as string;
+        const editor = new SearchReplaceEditor(reader);
+        const result = await editor.apply(filePath, searchBlock, replaceBlock);
+        if (!result.success) {
+          if (result.matchCount === 0) {
+            return 'BLOCK_NOT_FOUND: O bloco de busca não foi encontrado no arquivo. Verifique se o código está exatamente como está no arquivo.';
+          }
+          if (result.matchCount > 1) {
+            return `AMBIGUOUS_MATCH: O bloco de busca aparece ${result.matchCount} vezes no arquivo. Forneça um bloco mais específico.`;
+          }
+          throw new Error(
+            `searchReplace failed for "${filePath}": ${result.error}`
+          );
+        }
+        return `OK: File "${filePath}" has been updated.`;
+      }
+    );
+
+    // Tool: readFileForEdit — leitura com numeração de linhas
+    this.toolRegistry.register(
+      'readFileForEdit',
+      'Read a file with line numbers prepended to each line. Use this tool to see the exact content with line numbers, so you can identify blocks to use with the searchReplace tool.',
+      {
+        filePath: { type: 'string', description: 'Absolute or relative path to the file' },
+      },
+      async (args) => {
+        const filePath = args.filePath as string;
+        const content = await reader.readFile(filePath);
+        const lines = content.split('\n');
+        const numbered = lines.map((line, i) => {
+          const lineNum = String(i + 1).padStart(4, ' ');
+          return `${lineNum} | ${line}`;
+        });
+        return numbered.join('\n');
       }
     );
   }

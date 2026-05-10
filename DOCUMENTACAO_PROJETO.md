@@ -21,10 +21,19 @@ AgenteIA/
 ├── tsconfig.json               # Configuração do TypeScript
 ├── .gitignore                  # Arquivos ignorados pelo Git
 ├── DOCUMENTACAO_PROJETO.md     # Esta documentação
+├── tests/
+│   ├── unit/                   # Testes unitários (mockados, zero I/O real)
+│   └── integration/            # Testes de integração (filesystem real)
+│       └── editing-pipeline.test.ts  # Pipeline ASTEditor + SearchReplaceEditor
 ├── src/
 │   ├── cli/
 │   │   ├── index.ts            # Entrypoint da CLI + parser de argumentos
-│   │   └── commands.ts         # Roteamento e implementação dos comandos (DIP)
+│   │   ├── commands.ts         # Roteamento e implementação dos comandos (DIP)
+│   │   └── strategies/         # Estratégias de chat (Strategy Pattern)
+│   │       ├── index.ts        # Re-exports
+│   │       ├── ChatStrategy.ts # Interface + buildSystemPrompt() + editing workflow
+│   │       ├── StreamStrategy.ts # Streaming direto (SSE)
+│   │       └── ReActStrategy.ts  # ReAct loop com ou sem streaming
 │   ├── core/
 │   │   ├── index.ts            # Re-exports públicos do módulo core
 │   │   ├── FileReader.ts       # Abstração do sistema de arquivos
@@ -34,6 +43,12 @@ AgenteIA/
 │   │   ├── ProviderFactory.ts  # Factory para criar providers (OCP)
 │   │   ├── SessionStore.ts     # Persistência de conversas em disco (JSON)
 │   │   ├── SessionManager.ts   # Orquestração da sessão ativa + histórico
+│   │   ├── TokenEstimator.ts   # Estimador de tokens para compressão de contexto
+│   │   ├── IContextCompressor.ts # Interface do compressor de contexto (ISP)
+│   │   ├── StatefulCompressor.ts # Compressor com fallback + logging (SRP)
+│   │   ├── astUtils.ts         # Utilitários de AST (parsing + análise)
+│   │   ├── ASTEditor.ts        # Edição de código-fonte via AST (substituição por símbolo)
+│   │   ├── SearchReplaceEditor.ts # Edição de arquivos por busca/substituição de blocos
 │   │   └── rag/
 │   │       ├── index.ts        # Re-exports do módulo RAG
 │   │       ├── IChunker.ts     # Interface do Chunker (ISP/DIP)
@@ -62,12 +77,6 @@ AgenteIA/
 │   │   ├── types.ts            # Interfaces: IProvider, IEmbedProvider, ChatRequest, etc.
 │   │   ├── OllamaProvider.ts   # Provider Ollama (chat + streamChat + embed)
 │   │   └── OllamaHttpClient.ts # Cliente HTTP de baixo nível (post + postStream)
-│   ├── cli/
-│   │   ├── strategies/         # Estratégias de chat (Strategy Pattern)
-│   │   │   ├── index.ts        # Re-exports
-│   │   │   ├── ChatStrategy.ts # Interface + buildSystemPrompt()
-│   │   │   ├── StreamStrategy.ts # Streaming direto (SSE)
-│   │   │   └── ReActStrategy.ts  # ReAct loop com ou sem streaming
 │   └── validation/
 │       └── JsonValidator.ts    # Validador JSON puro (SRP, zero dependências)
 ```

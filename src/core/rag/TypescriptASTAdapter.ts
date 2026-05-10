@@ -14,6 +14,7 @@
 
 import * as ts from 'typescript';
 import type { IASTParser, ASTNode } from './IASTParser';
+import { getNodeName as sharedGetNodeName } from '../astUtils';
 
 export class TypescriptASTAdapter implements IASTParser {
   /**
@@ -126,34 +127,10 @@ export class TypescriptASTAdapter implements IASTParser {
 
   /**
    * Extrai o nome do nó.
+   * Delega para a função compartilhada em astUtils.ts.
    */
   private getNodeName(node: ts.Node, _source: string, sourceFile: ts.SourceFile): string {
-    const kind = node.kind;
-
-    if (kind === ts.SyntaxKind.ExportAssignment) {
-      return 'export_default';
-    }
-
-    const nameNode = (node as ts.NamedDeclaration).name;
-    if (nameNode) {
-      return nameNode.getText(sourceFile);
-    }
-
-    // Para VariableStatement, tenta extrair o nome da variável
-    if (kind === ts.SyntaxKind.VariableStatement) {
-      const varStmt = node as ts.VariableStatement;
-      const declarations = varStmt.declarationList.declarations;
-      if (declarations.length > 0 && declarations[0].name) {
-        return declarations[0].name.getText(sourceFile);
-      }
-    }
-
-    // Para constructor sem nome explícito
-    if (kind === ts.SyntaxKind.Constructor) {
-      return 'constructor';
-    }
-
-    return '<anonymous>';
+    return sharedGetNodeName(node, sourceFile);
   }
 
   /**

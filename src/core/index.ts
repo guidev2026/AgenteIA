@@ -16,6 +16,12 @@ export { CommandExecutor } from './CommandExecutor';
 export type { CommandResult } from './CommandExecutor';
 export { ToolRegistry } from './ToolRegistry';
 export type { ToolDefinition } from './ToolRegistry';
+export { TokenEstimator, DEFAULT_CONTEXT_WINDOWS } from './TokenEstimator';
+
+// Context Compressor (ISP + DIP)
+export type { IContextCompressor, CompressedContext } from './IContextCompressor';
+export { CompressionTrigger, assessCompressionNeed } from './IContextCompressor';
+export { StatefulCompressor } from './StatefulCompressor';
 
 // Fábrica de providers (OCP)
 export { ProviderFactory } from './ProviderFactory';
@@ -55,6 +61,14 @@ export type { Session, SessionSummary, ISessionStore } from './SessionStore';
 
 // Session Manager (orquestração de sessão ativa)
 export { SessionManager } from './SessionManager';
+
+// AST Editor (edição estrutural de código)
+export { ASTEditor } from './ASTEditor';
+export type { ASTEditResult } from './ASTEditor';
+
+// SearchReplace Editor (edição por bloco exato)
+export { SearchReplaceEditor } from './SearchReplaceEditor';
+export type { SearchReplaceResult } from './SearchReplaceEditor';
 
 // Validação JSON
 export { JsonValidator, ValidationError } from '../validation/JsonValidator';

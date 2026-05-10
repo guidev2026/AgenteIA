@@ -20,6 +20,9 @@ import type { Reflector, ReflectionResult, ReflectionError } from '../Reflector'
 import { JsonValidator } from '../../validation/JsonValidator';
 import { PromptBuilder } from './PromptBuilder';
 import type { PromptConfig } from './PromptBuilder';
+import { assessCompressionNeed, CompressionTrigger } from '../IContextCompressor';
+import type { IContextCompressor } from '../IContextCompressor';
+import { TokenEstimator } from '../TokenEstimator';
 
 const MAX_ITERATIONS = 5;
 
@@ -35,6 +38,10 @@ export interface ReActResult {
   correctionStatus?: 'stable' | 'suspicious' | 'rejected';
   /** Erros encontrados pelo Reflector (vazio se não houve reflexão) */
   errors?: ReflectionError[];
+  /** Indica se a compressão de contexto foi aplicada no histórico */
+  wasCompressed?: boolean;
+  /** Taxa de compressão (0.0 a 1.0), presente apenas se wasCompressed for true */
+  compressionRatio?: number;
 }
 
 /** Opções de streaming para o ReActLoop */
@@ -53,6 +60,7 @@ export class ReActLoop {
   private executor?: CommandExecutor;
   private toolRegistry?: ToolRegistry;
   private reflector?: Reflector;
+  private compressor?: IContextCompressor;
   private jsonValidator: JsonValidator;
   private promptBuilder: PromptBuilder;
 
@@ -60,12 +68,14 @@ export class ReActLoop {
     provider: IProvider,
     executor?: CommandExecutor,
     toolRegistry?: ToolRegistry,
-    reflector?: Reflector
+    reflector?: Reflector,
+    compressor?: IContextCompressor
   ) {
     this.provider = provider;
     this.executor = executor;
     this.toolRegistry = toolRegistry;
     this.reflector = reflector;
+    this.compressor = compressor;
     this.jsonValidator = new JsonValidator();
     this.promptBuilder = new PromptBuilder();
   }
@@ -349,15 +359,49 @@ export class ReActLoop {
     const resolvedModel = model ?? 'tinyllama:1b';
     const reflectFlag = options?.reflect === true;
 
+    // ── Compressão de contexto (pré-buildPrompt) ──
+    let currentHistory = history;
+    let wasCompressed = false;
+    let compressionRatio: number | undefined;
+
+    if (this.compressor) {
+      const estimatedTokens =
+        TokenEstimator.estimateMessages(history) +
+        TokenEstimator.estimate(systemPrompt);
+      const contextLimit = TokenEstimator.getLimit(resolvedModel);
+      const need = assessCompressionNeed(estimatedTokens, contextLimit);
+
+      if (need !== CompressionTrigger.NONE) {
+        const compressed = await this.compressor.compress(history, resolvedModel, systemPrompt);
+        const workingMemoryMsg: ReActMessage = {
+          role: 'system',
+          content: compressed.workingMemory,
+        };
+        currentHistory = [workingMemoryMsg, ...compressed.keptMessages];
+        wasCompressed = true;
+        compressionRatio = compressed.compressionRatio;
+        console.error(
+          `[ReActLoop] Context compressed at ${need} trigger. ` +
+          `Ratio: ${(compressed.compressionRatio * 100).toFixed(1)}%`,
+        );
+      }
+    }
+
     let result: ReActResult;
 
     if (options?.jsonMode && this.toolRegistry) {
-      result = await this.executeJsonMode(systemPrompt, history, resolvedModel, options?.stream);
+      result = await this.executeJsonMode(systemPrompt, currentHistory, resolvedModel, options?.stream);
     } else {
-      result = await this.executeTextMode(systemPrompt, history, resolvedModel, options?.stream);
+      result = await this.executeTextMode(systemPrompt, currentHistory, resolvedModel, options?.stream);
     }
 
     // Aplica reflexão após a resposta final (ambos os modos)
-    return this.applyReflection(result, resolvedModel, reflectFlag);
+    result = await this.applyReflection(result, resolvedModel, reflectFlag);
+
+    return {
+      ...result,
+      wasCompressed,
+      compressionRatio: wasCompressed ? compressionRatio : undefined,
+    };
   }
 }
