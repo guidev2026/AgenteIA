@@ -36,7 +36,11 @@ AgenteIA/
 │   │   ├── SessionManager.ts   # Orquestração da sessão ativa + histórico
 │   │   └── rag/
 │   │       ├── index.ts        # Re-exports do módulo RAG
-│   │       ├── Chunker.ts      # Divisão de texto em chunks (SRP)
+│   │       ├── IChunker.ts     # Interface do Chunker (ISP/DIP)
+│   │       ├── Chunker.ts      # Divisão de texto em chunks (SRP, implementa IChunker)
+│   │       ├── IASTParser.ts   # Interface para parseadores AST (ISP)
+│   │       ├── TypescriptASTAdapter.ts # Parseador AST concreto (Adapter Pattern)
+│   │       ├── ASTChunkerService.ts # Chunking AST-aware com fallback (Decorator)
 │   │       ├── Embedder.ts     # Geração de embeddings (SRP)
 │   │       ├── VectorStore.ts  # Cache de embeddings em disco (SRP)
 │   │       ├── Retriever.ts    # Busca por similaridade (SRP)
@@ -735,10 +739,12 @@ A suíte de testes usa **Vitest** (v4.1.5) e está organizada em `tests/unit/`, 
 | **RAG** | `tests/unit/rag/Retriever.test.ts` | 13 | Cosine similarity, rankeamento, ordenação, busca vazia |
 | **RAG** | `tests/unit/rag/ReActLoop.test.ts` | 26 | **Text Mode:** ACTION/FINAL_ANSWER, limite 5 iterações, erro em ACTION, build de prompt, modelo padrão. **JSON Mode:** final_response direta, tool_call → ferramenta → final_response, detecção de loop repetido, fallback text mode, resposta não-JSON, formato desconhecido, erro em ferramenta, esgotamento de iterações. **Reflector:** text/json mode com reflect, correção, reflect=false, reflector não injetado, resposta vazia. **Streaming:** jsonMode + stream, textMode + stream, sem streamChat (fallback), stream desativado, múltiplas iterações com stream |
 | **RAG** | `tests/unit/rag/Chunker.test.ts` | 8 | Chunking por parágrafo, sentença, overlap, limite de chunks |
+| **RAG** | `tests/unit/rag/TypescriptASTAdapter.test.ts` | 19 | Roteamento de extensões (.ts, .js, .tsx, .jsx, .mjs, .cjs), fallback para não-código, parse de classes/funções/imports/exports, ASTNode structure, empty file handling |
+| **RAG** | `tests/unit/rag/ASTChunkerService.test.ts` | 9 | Extension routing (AST vs fallback), AST parse results, large class subdivision (métodos como chunks individuais), large non-class node subdivision, MAX_CHUNKS_PER_FILE limit |
 | **Validation** | `tests/unit/validation/JsonValidator.test.ts` | 13 | validate(), tryValidate(), ValidationError |
 | **CLI** | `tests/unit/cli/commands.test.ts` | 15 | Comandos read/dir/search/exec/chat, flags --stream/--json/--no-think, fallback streaming direto, erro de comando faltando |
 
-**Total: 119 testes, todos passando.**
+**Total: 177 testes, todos passando.**
 
 ### Estratégia de Mocks (zero I/O real)
 
@@ -785,7 +791,7 @@ npx vitest            # Modo watch (recarrega automático)
 - Zero dependências externas em produção (apenas `node:http`, `node:fs/promises`, `node:child_process`)
 - TypeScript configurado com strict mode
 - ✅ **SOLID implementado** — SRP (classes coesas), OCP (ProviderFactory), LSP (IProvider), ISP (interfaces enxutas), DIP (AppContext + injeção de dependências)
-- ✅ **149 testes unitários** passando com Vitest (12 arquivos: ToolRegistry, CommandExecutor, Reflector, ErrorJournal, SessionStore, SessionManager, OllamaProvider, Retriever, ReActLoop, Chunker, JsonValidator, commands)
+- ✅ **177 testes unitários** passando com Vitest (14 arquivos de teste: ToolRegistry, CommandExecutor, Reflector, ErrorJournal, SessionStore, SessionManager, OllamaProvider, Retriever, ReActLoop, Chunker, TypescriptASTAdapter, ASTChunkerService, JsonValidator, commands)
 
 📝 **Possíveis próximos passos (não implementados):**
 - [já implementado] ~~Adicionar streaming de respostas do Ollama (SSE)~~
