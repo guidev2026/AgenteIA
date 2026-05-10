@@ -1,5 +1,5 @@
 /**
- * RAGManager: Orquestrador do pipeline RAG (SRP — orquestração pura).
+ * RAGManager: Orquestrador do pipeline RAG + GraphRAG (SRP — orquestração pura).
  *
  * Responsabilidade Única: Coordenar as etapas do pipeline RAG:
  * 1. Coletar arquivos texto do diretório
@@ -7,9 +7,10 @@
  * 3. Embedding (delega para Embedder)
  * 4. Cache em disco (delega para VectorStore)
  * 5. Busca semântica (delega para Retriever)
+ * 6. Construção do KnowledgeGraph (delega para GraphBuilder)
  *
  * Esta classe NÃO implementa chunking, NÃO gera embeddings,
- * NÃO salva arquivos — ela apenas coordena as peças.
+ * NÃO salva arquivos, NÃO constrói grafos — ela apenas coordena as peças.
  */
 
 import * as fs from 'node:fs/promises';
@@ -23,6 +24,11 @@ import { Retriever } from './Retriever';
 import type { SearchMatch } from './Retriever';
 import type { ChunkEntry } from './VectorStore';
 import type { IEmbedProvider } from '../../providers/types';
+import { GraphBuilder } from './graph/GraphBuilder';
+import type { IGraphStore } from './graph/IGraphStore';
+import type { IRelationshipExtractor } from './graph/IRelationshipExtractor';
+import { ASTRelationshipExtractor } from './graph/ASTRelationshipExtractor';
+import { JsonGraphStore } from './graph/JsonGraphStore';
 
 // Extensões de arquivos texto para indexar
 const TEXT_EXTENSIONS = new Set([
@@ -37,19 +43,22 @@ export class RAGManager {
   private readonly embedder: Embedder;
   private readonly vectorStore: VectorStore;
   private readonly retriever: Retriever;
+  private readonly graphBuilder: GraphBuilder | null;
 
   constructor(
     fileReader: FileReader,
     chunker: IChunker,
     embedder: Embedder,
     vectorStore: VectorStore,
-    retriever: Retriever
+    retriever: Retriever,
+    graphBuilder?: GraphBuilder | null
   ) {
     this.fileReader = fileReader;
     this.chunker = chunker;
     this.embedder = embedder;
     this.vectorStore = vectorStore;
     this.retriever = retriever;
+    this.graphBuilder = graphBuilder ?? null;
   }
 
   /**
@@ -59,13 +68,25 @@ export class RAGManager {
    *
    * @param fileReader FileReader para ler arquivos
    * @param embedProvider Provider de embeddings (ex: OllamaProvider)
+   * @param graphStorePath Caminho para persistir o grafo (opcional, ex: ".soberano/graph.json")
    */
-  static create(fileReader: FileReader, embedProvider: IEmbedProvider, chunker?: IChunker): RAGManager {
+  static create(
+    fileReader: FileReader,
+    embedProvider: IEmbedProvider,
+    chunker?: IChunker,
+    graphStorePath?: string
+  ): RAGManager {
     const effectiveChunker = chunker ?? new Chunker();
     const embedder = new Embedder(embedProvider);
     const vectorStore = new VectorStore();
     const retriever = new Retriever();
-    return new RAGManager(fileReader, effectiveChunker, embedder, vectorStore, retriever);
+    let graphBuilder: GraphBuilder | undefined;
+    if (graphStorePath) {
+      const graphStore: IGraphStore = new JsonGraphStore(graphStorePath);
+      const extractor: IRelationshipExtractor = new ASTRelationshipExtractor();
+      graphBuilder = new GraphBuilder(fileReader, extractor, graphStore);
+    }
+    return new RAGManager(fileReader, effectiveChunker, embedder, vectorStore, retriever, graphBuilder);
   }
 
   /**
@@ -250,6 +271,11 @@ export class RAGManager {
       files: finalFiles,
       chunks: finalChunks,
     });
+
+    // 8. Constrói/atualiza o KnowledgeGraph (se habilitado)
+    if (this.graphBuilder) {
+      await this.graphBuilder.build({ rootDir: absoluteRoot, maxFiles: filesToIndex.length });
+    }
   }
 
   /**

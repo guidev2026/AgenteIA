@@ -46,7 +46,17 @@ AgenteIA/
 │   │       ├── Retriever.ts    # Busca por similaridade (SRP)
 │   │       ├── RAGManager.ts   # Orquestrador do pipeline RAG
 │   │       ├── PromptBuilder.ts# Montagem de prompt com contexto (SRP)
-│   │       └── ReActLoop.ts    # Loop Reasoning + Acting (Strategy)
+│   │       ├── ReActLoop.ts    # Loop Reasoning + Acting (Strategy)
+│   │       └── graph/
+│   │           ├── index.ts               # Re-exports do módulo GraphRAG
+│   │           ├── types.ts               # KnowledgeGraph, GraphNode, GraphEdge
+│   │           ├── IGraphStore.ts         # Interface de persistência (ISP/DIP)
+│   │           ├── IRelationshipExtractor.ts # Interface de extração (ISP/DIP)
+│   │           ├── IGraphQuery.ts         # Interface de consulta (ISP/DIP)
+│   │           ├── JsonGraphStore.ts      # Persistência JSON (SRP)
+│   │           ├── ASTRelationshipExtractor.ts # Extração via AST (SRP)
+│   │           ├── GraphBuilder.ts        # Construtor do grafo (SRP)
+│   │           └── GraphRAGManager.ts     # Busca híbrida vetorial + grafo (SRP)
 │   ├── providers/
 │   │   ├── index.ts            # Re-exports públicos do módulo providers
 │   │   ├── types.ts            # Interfaces: IProvider, IEmbedProvider, ChatRequest, etc.
@@ -723,6 +733,116 @@ npm run dev -- chat "Nova conversa" --new-session
 
 ---
 
+## 🔧 Tópico 15 — GraphRAG: Busca Híbrida Vetorial + Grafo de Conhecimento
+
+### Visão Geral
+
+O **GraphRAG** estende o RAG clássico com um **grafo de conhecimento** que mapeia relações estruturais entre arquivos do projeto: imports, exports, herança de classes e chamadas de funções. A busca híbrida combina similaridade vetorial (chunks semânticos) com navegação no grafo (relações topológicas) para resultados mais precisos.
+
+### Arquitetura SOLID
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                    RAGManager (orquestrador)                       │
+│                                                                   │
+│  ensureIndex(dir)                                                 │
+│    └── Chunker → chunks                                           │
+│    └── Embedder → embeddings                                      │
+│    └── GraphBuilder.build(chunks) → KnowledgeGraph                │
+│    └── JsonGraphStore.save(graph)                                 │
+│    └── VectorStore.save(embeddings)                               │
+│                                                                   │
+│  retrieve(query, dir)                                             │
+│    └── Retriever → top 5 chunks (vetorial)                        │
+│    └── GraphRAGManager.enhance(query, top5, graph) → merged       │
+│    └── Retorna SearchMatch[] combinado                            │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Interfaces e Classes (SRP + ISP)
+
+| Interface/Classe | Arquivo | Responsabilidade |
+|-----------------|---------|-----------------|
+| `KnowledgeGraph`, `GraphNode`, `GraphEdge` | `types.ts` | Tipos de domínio do grafo |
+| `IGraphStore` | `IGraphStore.ts` | Contrato de persistência do grafo |
+| `IRelationshipExtractor` | `IRelationshipExtractor.ts` | Contrato de extração de relações de texto |
+| `IGraphQuery` | `IGraphQuery.ts` | Contrato de consulta (busca por similaridade + adjacência) |
+| `JsonGraphStore` | `JsonGraphStore.ts` | Persistência do grafo em `.soberano/graph.json` (SRP) |
+| `ASTRelationshipExtractor` | `ASTRelationshipExtractor.ts` | Extrai imports/exports/herança do AST TypeScript (SRP) |
+| `GraphBuilder` | `GraphBuilder.ts` | Constrói o grafo a partir de chunks usando extractors (SRP) |
+| `GraphRAGManager` | `GraphRAGManager.ts` | Busca híbrida: vetorial + adjacência no grafo (SRP) |
+
+### KnowledgeGraph — Estrutura de Dados
+
+```typescript
+interface GraphNode {
+  id: string;              // "src/core/ReActLoop.ts"
+  label: string;           // "ReActLoop"
+  type: 'file' | 'class' | 'function' | 'interface' | 'variable';
+  filePath: string;
+  line: number;
+}
+
+interface GraphEdge {
+  source: string;          // node id de origem
+  target: string;          // node id de destino
+  relationship: 'imports' | 'exports' | 'extends' | 'implements' | 'calls';
+}
+
+interface KnowledgeGraph {
+  nodes: Map<string, GraphNode>;
+  edges: GraphEdge[];
+}
+```
+
+### Pipeline GraphRAG no RAGManager.ensureIndex()
+
+1. **Chunking:** Arquivos são divididos em chunks (512 chars, overlap 64)
+2. **Embeddings:** Cada chunk é convertido em vetor 384-dim (all-minilm)
+3. **GraphBuilder.build(chunks):**
+   - Para cada chunk, extrai relações via `ASTRelationshipExtractor.extract(chunk.text)`
+   - Converte relações em nós e arestas do grafo
+   - Deduplica nós e arestas por ID único
+4. **Persistência:** Grafo salvo em `.soberano/graph.json`, embeddings em `.soberano/index.json`
+
+### Pipeline de Busca Híbrida (GraphRAGManager.enhance())
+
+```
+Usuário: "Como o ReActLoop chama o ToolRegistry?"
+
+1. Retriever.query → top 5 chunks por cosine similarity
+2. GraphRAGManager.enhance(query, top5, graph):
+   a. Para cada chunk nos top5, busca nós adjacentes no grafo
+   b. Adiciona chunks dos nós vizinhos (com decay de score * 0.8)
+   c. Limita a no máximo 8 chunks no total
+   d. Reordena por score descendente
+3. Retorna top 5 (ou menos) da lista mesclada
+4. PromptBuilder injeta no contexto
+```
+
+### Mecanismos de robustez
+
+| Mecanismo | Descrição |
+|-----------|-----------|
+| **Fallback vetorial puro** | Se o grafo não existir ou `enhance()` lançar erro, cai para busca vetorial clássica |
+| **Sem dependências** | O AST extractor usa `node:fs` + regex para detectar imports/exports (sem parser TypeScript real) |
+| **Cache do grafo** | `JsonGraphStore.save()` só persiste se houve mudanças (hash dos chunks) |
+| **Decay de score** | Chunks do grafo entram com score * 0.8 para não dominarem os puramente vetoriais |
+| **Limite de expansão** | Máximo 8 chunks no total pós-expansão (evita lentidão em projetos grandes) |
+| **Arquivo corrompido** | `load()` retorna `null` se JSON for inválido → `GraphRAGManager` usa fallback |
+
+### Exemplo de uso
+
+```bash
+# RAG clássico + GraphRAG (automático, sem flag extra)
+npm run dev -- chat "Como o ToolRegistry registra ferramentas?" --rag .
+
+# O GraphRAGManager.enhance() expande os top5 chunks com
+# nós vizinhos no grafo (arquivos que importam ToolRegistry)
+```
+
+---
+
 ## 🧪 Testes Unitários
 
 A suíte de testes usa **Vitest** (v4.1.5) e está organizada em `tests/unit/`, espelhando a estrutura do `src/`.
@@ -740,11 +860,15 @@ A suíte de testes usa **Vitest** (v4.1.5) e está organizada em `tests/unit/`, 
 | **RAG** | `tests/unit/rag/ReActLoop.test.ts` | 26 | **Text Mode:** ACTION/FINAL_ANSWER, limite 5 iterações, erro em ACTION, build de prompt, modelo padrão. **JSON Mode:** final_response direta, tool_call → ferramenta → final_response, detecção de loop repetido, fallback text mode, resposta não-JSON, formato desconhecido, erro em ferramenta, esgotamento de iterações. **Reflector:** text/json mode com reflect, correção, reflect=false, reflector não injetado, resposta vazia. **Streaming:** jsonMode + stream, textMode + stream, sem streamChat (fallback), stream desativado, múltiplas iterações com stream |
 | **RAG** | `tests/unit/rag/Chunker.test.ts` | 8 | Chunking por parágrafo, sentença, overlap, limite de chunks |
 | **RAG** | `tests/unit/rag/TypescriptASTAdapter.test.ts` | 19 | Roteamento de extensões (.ts, .js, .tsx, .jsx, .mjs, .cjs), fallback para não-código, parse de classes/funções/imports/exports, ASTNode structure, empty file handling |
+| **Graph** | `tests/unit/graph/JsonGraphStore.test.ts` | 20 | CRUD do grafo, persistência JSON, operações de escrita (IGraphStore) |
+| **Graph** | `tests/unit/graph/ASTRelationshipExtractor.test.ts` | 17 | Extração de relações de imports/exports/herança via AST |
+| **Graph** | `tests/unit/graph/GraphBuilder.test.ts` | 9 | Construção do grafo a partir de chunks, extração cíclica de relações |
+| **Graph** | `tests/unit/graph/GraphRAGManager.test.ts` | 12 | Busca híbrida (vetorial + grafo), fallback para vetorial puro, convergência de resultados |
 | **RAG** | `tests/unit/rag/ASTChunkerService.test.ts` | 9 | Extension routing (AST vs fallback), AST parse results, large class subdivision (métodos como chunks individuais), large non-class node subdivision, MAX_CHUNKS_PER_FILE limit |
 | **Validation** | `tests/unit/validation/JsonValidator.test.ts` | 13 | validate(), tryValidate(), ValidationError |
 | **CLI** | `tests/unit/cli/commands.test.ts` | 15 | Comandos read/dir/search/exec/chat, flags --stream/--json/--no-think, fallback streaming direto, erro de comando faltando |
 
-**Total: 177 testes, todos passando.**
+**Total: 235 testes, todos passando.**
 
 ### Estratégia de Mocks (zero I/O real)
 
@@ -791,12 +915,13 @@ npx vitest            # Modo watch (recarrega automático)
 - Zero dependências externas em produção (apenas `node:http`, `node:fs/promises`, `node:child_process`)
 - TypeScript configurado com strict mode
 - ✅ **SOLID implementado** — SRP (classes coesas), OCP (ProviderFactory), LSP (IProvider), ISP (interfaces enxutas), DIP (AppContext + injeção de dependências)
-- ✅ **177 testes unitários** passando com Vitest (14 arquivos de teste: ToolRegistry, CommandExecutor, Reflector, ErrorJournal, SessionStore, SessionManager, OllamaProvider, Retriever, ReActLoop, Chunker, TypescriptASTAdapter, ASTChunkerService, JsonValidator, commands)
+- ✅ **235 testes unitários** passando com Vitest (18 arquivos de teste: ToolRegistry, CommandExecutor, Reflector, ErrorJournal, SessionStore, SessionManager, OllamaProvider, Retriever, ReActLoop, Chunker, TypescriptASTAdapter, ASTChunkerService, JsonValidator, commands, JsonGraphStore, ASTRelationshipExtractor, GraphBuilder, GraphRAGManager)
 
 📝 **Possíveis próximos passos (não implementados):**
 - [já implementado] ~~Adicionar streaming de respostas do Ollama (SSE)~~
 - [já implementado] ~~Adicionar camada de auto-correção (Reflector + --reflect)~~
 - [já implementado] ~~Adicionar suporte a sessões/conversa com histórico (multi-turn)~~
+- [já implementado] ~~Adicionar GraphRAG — busca híbrida vetorial + grafo de conhecimento~~
 - Implementar novos providers (OpenAI, Anthropic, etc.)
 - Expandir ToolRegistry com mais ferramentas (writeFile, searchFiles, etc.)
 - Melhorar chunking com overlap adaptativo por estrutura (AST-aware)
