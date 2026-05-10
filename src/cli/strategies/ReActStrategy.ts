@@ -19,7 +19,7 @@ import type { ICritiqueProvider } from '../../providers/types';
 function isCritiqueProvider(p: unknown): p is ICritiqueProvider {
   return typeof (p as ICritiqueProvider).critique === 'function';
 }
-import { ReActLoop, CommandExecutor, Reflector, ErrorJournal } from '../../core';
+import { ReActLoop, CommandExecutor, Reflector, ErrorJournal, StatefulCompressor } from '../../core';
 
 export class ReActStrategy implements ChatStrategy {
   async execute(ctx: ChatContext): Promise<string> {
@@ -62,11 +62,15 @@ export class ReActStrategy implements ChatStrategy {
     // Cria o ReActLoop com dependências injetadas
     // - jsonMode = true: usa toolRegistry (JSON tool calls)
     // - jsonMode = false: usa commandExecutor (texto ACTION/FINAL_ANSWER)
+    // StatefulCompressor: compressão de contexto para evitar estouro de tokens
+    const compressor = new StatefulCompressor(provider);
+
     const reactLoop = new ReActLoop(
       provider,
       jsonMode ? undefined : commandExecutor,
       jsonMode ? toolRegistry : undefined,
-      reflector // injeta o Reflector (undefined se --reflect não ativo)
+      reflector, // injeta o Reflector (undefined se --reflect não ativo)
+      compressor // injeta o compressor de contexto
     );
 
     // Indicador visual de "pensamento" durante o ReAct

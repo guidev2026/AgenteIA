@@ -152,7 +152,8 @@ export class SearchReplaceEditor {
     const beforeLines = originalLines.slice(0, startLine);
     const afterLines = originalLines.slice(endLine);
 
-    const newContent = [...beforeLines, replaceBlock, ...afterLines].join('\n');
+    const replaceLines = replaceBlock.split('\n');
+    const newContent = [...beforeLines, ...replaceLines, ...afterLines].join('\n');
 
     // 7. Escrever o arquivo
     try {

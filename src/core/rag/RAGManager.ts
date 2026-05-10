@@ -29,6 +29,7 @@ import type { IGraphStore } from './graph/IGraphStore';
 import type { IRelationshipExtractor } from './graph/IRelationshipExtractor';
 import { ASTRelationshipExtractor } from './graph/ASTRelationshipExtractor';
 import { JsonGraphStore } from './graph/JsonGraphStore';
+import { TypescriptASTAdapter } from './TypescriptASTAdapter';
 
 // Extensões de arquivos texto para indexar
 const TEXT_EXTENSIONS = new Set([
@@ -83,7 +84,8 @@ export class RAGManager {
     let graphBuilder: GraphBuilder | undefined;
     if (graphStorePath) {
       const graphStore: IGraphStore = new JsonGraphStore(graphStorePath);
-      const extractor: IRelationshipExtractor = new ASTRelationshipExtractor();
+      const astParser = new TypescriptASTAdapter();
+      const extractor: IRelationshipExtractor = new ASTRelationshipExtractor(astParser);
       graphBuilder = new GraphBuilder(fileReader, extractor, graphStore);
     }
     return new RAGManager(fileReader, effectiveChunker, embedder, vectorStore, retriever, graphBuilder);

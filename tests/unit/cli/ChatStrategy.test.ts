@@ -29,7 +29,11 @@ function makeMockApp(toolRegistry: ReturnType<typeof makeToolRegistry>): AppCont
   return {
     toolRegistry: toolRegistry as any,
     fileReader: {} as any,
-    embedProvider: undefined,
+    embedProvider: {
+      embed: vi.fn().mockResolvedValue([0.1, 0.2, 0.3]),
+      name: 'mock-embed',
+      chat: vi.fn(),
+    },
     commandExecutor: {} as any,
     config: { provider: 'ollama', model: 'test' },
     llmProvider: {} as any,
