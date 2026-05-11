@@ -146,10 +146,10 @@ export class AppContext {
     // Tool: execute
     this.toolRegistry.register(
       'execute',
-      'Execute a shell command safely (no shell injection). Returns stdout.',
+      'Executa comandos de terminal de forma segura (shell: false). OBRIGATÓRIO: Utilizar esta ferramenta para rodar \'npm test\', \'tsc\' ou scripts de build IMEDIATAMENTE APÓS usar writeFile ou ferramentas de edição. Se o comando falhar, lê a saída de erro e corrige o código na próxima iteração.',
       {
         command: { type: 'string', description: 'The executable name (e.g., ls, git, node)' },
-        args: { type: 'array', description: 'Arguments as array of strings, e.g. ["-la"]' },
+        args: { type: 'array', description: 'Argumentos do comando como um array estrito de strings. NUNCA passar uma única string concatenada.' },
       },
       async (toolArgs) => {
         const cmd = toolArgs.command as string;
