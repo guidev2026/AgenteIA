@@ -100,7 +100,7 @@ export class ReActStrategy implements ChatStrategy {
     // Persiste erros de reflexão para auditoria (TASK 6)
     if (result.errors && result.errors.length > 0) {
       for (const err of result.errors) {
-        journal.addEntry({
+        await journal.addEntry({
           timestamp: new Date().toISOString(),
           model,
           type: err.type,
@@ -120,7 +120,7 @@ export class ReActStrategy implements ChatStrategy {
 
       // Flag --verbose: estatísticas detalhadas do ErrorJournal (TASK 7)
       if (reflectMode && ctx.reflectMode) {
-        const stats = journal.getStats();
+        const stats = await journal.getStats();
         if (stats.total > 0) {
           console.error(`📊 Journal: ${stats.total} erro${stats.total > 1 ? 's' : ''} registrado${stats.total > 1 ? 's' : ''}`);
           if (stats.byType && Object.keys(stats.byType).length > 0) {

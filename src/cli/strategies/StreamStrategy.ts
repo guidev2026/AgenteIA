@@ -44,10 +44,11 @@ export class StreamStrategy implements ChatStrategy {
       : '';
 
     // Se não houver histórico, usa systemPrompt direto (já tem o sufixo "Pergunta do usuário")
-    // Se houver histórico, o buildSystemPrompt já pulou o sufixo, então precisamos
-    // concatenar o historyBlock + a nova pergunta explicitamente
+    // Se houver histórico, o buildSystemPrompt pulou o sufixo, mas a mensagem do usuário
+    // já foi adicionada ao histórico pelo commands.ts ANTES de chamar execute().
+    // Portanto, o historyBlock já contém a pergunta — adicioná-la novamente duplicaria.
     const finalPrompt = history.length > 0
-      ? systemPrompt + historyBlock + `Pergunta do usuário: ${prompt}`
+      ? systemPrompt + historyBlock
       : systemPrompt;
 
     // Indica o modelo no início da resposta

@@ -4,8 +4,10 @@
  * SRP: Responsabilidade única — salvar e recuperar registros de erros
  * encontrados pelo Reflector durante a auto-correção.
  *
- * Sem dependências externas: usa apenas node:fs (fs.promises) nativo.
- * Os registros são salvos em ~/.soberano/error-journal.json
+ * Sem dependências externas: usa apenas node:fs/promises nativo.
+ * Operações assíncronas para não bloquear o Event Loop.
+ *
+ * Os registros são salvos em .soberano/error-journal.json na raiz do projeto
  *
  * Formato do arquivo:
  * ```json
@@ -26,7 +28,7 @@
  * ```
  */
 
-import * as fs from 'node:fs';
+import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { CorrectionStatus } from '../providers/types';
 
@@ -48,7 +50,7 @@ export interface ErrorJournalData {
 }
 
 const DEFAULT_JOURNAL_PATH = path.join(
-  process.env.HOME || process.env.USERPROFILE || '/tmp',
+  process.cwd(),
   '.soberano',
   'error-journal.json'
 );
@@ -58,7 +60,7 @@ export class ErrorJournal {
   private maxEntries: number;
 
   /**
-   * @param filePath Caminho do arquivo JSON (opcional, default ~/.soberano/error-journal.json)
+   * @param filePath Caminho do arquivo JSON (opcional, default .soberano/error-journal.json na raiz do projeto)
    * @param maxEntries Número máximo de entradas (default 1000)
    */
   constructor(filePath?: string, maxEntries: number = 1000) {
@@ -67,12 +69,12 @@ export class ErrorJournal {
   }
 
   /**
-   * Carrega o journal do disco.
+   * Carrega o journal do disco (assíncrono).
    * Se o arquivo não existir, retorna um journal vazio.
    */
-  private loadSync(): ErrorJournalData {
+  private async load(): Promise<ErrorJournalData> {
     try {
-      const raw = fs.readFileSync(this.filePath, 'utf-8');
+      const raw = await fs.readFile(this.filePath, 'utf-8');
       const parsed = JSON.parse(raw) as ErrorJournalData;
       if (parsed.version === 1 && Array.isArray(parsed.entries)) {
         return parsed;
@@ -84,15 +86,13 @@ export class ErrorJournal {
   }
 
   /**
-   * Salva o journal no disco.
+   * Salva o journal no disco (assíncrono).
    */
-  private saveSync(data: ErrorJournalData): void {
+  private async save(data: ErrorJournalData): Promise<void> {
     try {
       const dir = path.dirname(this.filePath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
-      fs.writeFileSync(this.filePath, JSON.stringify(data, null, 2), 'utf-8');
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(this.filePath, JSON.stringify(data, null, 2), 'utf-8');
     } catch {
       // Falha silenciosa — o journal é auxiliar, não deve quebrar o fluxo
     }
@@ -103,8 +103,8 @@ export class ErrorJournal {
    *
    * @param entry Dados do erro a ser registrado
    */
-  addEntry(entry: ErrorJournalEntry): void {
-    const data = this.loadSync();
+  async addEntry(entry: ErrorJournalEntry): Promise<void> {
+    const data = await this.load();
     data.entries.push(entry);
 
     // Limita o número de entradas (FIFO)
@@ -112,14 +112,14 @@ export class ErrorJournal {
       data.entries = data.entries.slice(-this.maxEntries);
     }
 
-    this.saveSync(data);
+    await this.save(data);
   }
 
   /**
    * Retorna todos os entries do journal (mais recentes primeiro).
    */
-  getEntries(): ErrorJournalEntry[] {
-    const data = this.loadSync();
+  async getEntries(): Promise<ErrorJournalEntry[]> {
+    const data = await this.load();
     return data.entries.slice().reverse();
   }
 
@@ -129,8 +129,8 @@ export class ErrorJournal {
    * @param limit Número máximo de entries
    * @param type Filter por tipo de erro (opcional)
    */
-  getRecentEntries(limit: number = 10, type?: string): ErrorJournalEntry[] {
-    const all = this.getEntries();
+  async getRecentEntries(limit: number = 10, type?: string): Promise<ErrorJournalEntry[]> {
+    const all = await this.getEntries();
     const filtered = type ? all.filter((e) => e.type === type) : all;
     return filtered.slice(0, limit);
   }
@@ -138,13 +138,13 @@ export class ErrorJournal {
   /**
    * Retorna estatísticas agregadas do journal.
    */
-  getStats(): {
+  async getStats(): Promise<{
     total: number;
     byType: Record<string, number>;
     byStatus: Record<string, number>;
     lastEntry: string | null;
-  } {
-    const data = this.loadSync();
+  }> {
+    const data = await this.load();
     const byType: Record<string, number> = {};
     const byStatus: Record<string, number> = {};
 

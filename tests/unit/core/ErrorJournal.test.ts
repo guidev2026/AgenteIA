@@ -1,8 +1,8 @@
 /**
- * Testes unitários do ErrorJournal (TASK 6).
+ * Testes unitários do ErrorJournal (TASK 6, ARCH-04).
  *
  * Cobertura:
- * - addEntry e persistência
+ * - addEntry e persistência assíncrona
  * - getEntries ordenação FIFO reversa
  * - getRecentEntries com filtro
  * - getStats agregação
@@ -20,7 +20,7 @@ describe('ErrorJournal', () => {
   const testFile = path.join(testDir, 'test-journal.json');
   let journal: ErrorJournal;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     // Limpa resíduos de testes anteriores
     try { fs.rmSync(testDir, { recursive: true }); } catch { /* ok */ }
     journal = new ErrorJournal(testFile, 100);
@@ -30,13 +30,13 @@ describe('ErrorJournal', () => {
     try { fs.rmSync(testDir, { recursive: true }); } catch { /* ok */ }
   });
 
-  it('deve criar arquivo vazio quando não existe', () => {
-    const entries = journal.getEntries();
+  it('deve criar arquivo vazio quando não existe', async () => {
+    const entries = await journal.getEntries();
     expect(entries).toEqual([]);
   });
 
-  it('deve adicionar um entry e persisti-lo', () => {
-    journal.addEntry({
+  it('deve adicionar um entry e persisti-lo', async () => {
+    await journal.addEntry({
       timestamp: '2026-05-09T10:00:00.000Z',
       model: 'llama3.2:1b',
       type: 'hallucination',
@@ -46,7 +46,7 @@ describe('ErrorJournal', () => {
       correctedLength: 120,
     });
 
-    const entries = journal.getEntries();
+    const entries = await journal.getEntries();
     expect(entries).toHaveLength(1);
     expect(entries[0].type).toBe('hallucination');
     expect(entries[0].correctionStatus).toBe('stable');
@@ -55,8 +55,8 @@ describe('ErrorJournal', () => {
     expect(fs.existsSync(testFile)).toBe(true);
   });
 
-  it('deve retornar entries mais recentes primeiro', () => {
-    journal.addEntry({
+  it('deve retornar entries mais recentes primeiro', async () => {
+    await journal.addEntry({
       timestamp: '2026-05-09T10:00:00.000Z',
       model: 'tinyllama:1b',
       type: 'syntax',
@@ -66,7 +66,7 @@ describe('ErrorJournal', () => {
       correctedLength: 10,
     });
 
-    journal.addEntry({
+    await journal.addEntry({
       timestamp: '2026-05-09T11:00:00.000Z',
       model: 'tinyllama:1b',
       type: 'logic',
@@ -76,14 +76,14 @@ describe('ErrorJournal', () => {
       correctedLength: 30,
     });
 
-    const entries = journal.getEntries();
+    const entries = await journal.getEntries();
     expect(entries).toHaveLength(2);
     expect(entries[0].type).toBe('logic'); // Mais recente primeiro
     expect(entries[1].type).toBe('syntax');
   });
 
-  it('deve filtrar por tipo em getRecentEntries', () => {
-    journal.addEntry({
+  it('deve filtrar por tipo em getRecentEntries', async () => {
+    await journal.addEntry({
       timestamp: '2026-05-09T10:00:00.000Z',
       model: 'test',
       type: 'hallucination',
@@ -93,7 +93,7 @@ describe('ErrorJournal', () => {
       correctedLength: 10,
     });
 
-    journal.addEntry({
+    await journal.addEntry({
       timestamp: '2026-05-09T11:00:00.000Z',
       model: 'test',
       type: 'syntax',
@@ -103,16 +103,16 @@ describe('ErrorJournal', () => {
       correctedLength: 20,
     });
 
-    const filtered = journal.getRecentEntries(10, 'hallucination');
+    const filtered = await journal.getRecentEntries(10, 'hallucination');
     expect(filtered).toHaveLength(1);
     expect(filtered[0].type).toBe('hallucination');
   });
 
-  it('deve limitar número de entradas (FIFO)', () => {
+  it('deve limitar número de entradas (FIFO)', async () => {
     const smallJournal = new ErrorJournal(testFile, 3);
 
     for (let i = 0; i < 5; i++) {
-      smallJournal.addEntry({
+      await smallJournal.addEntry({
         timestamp: `2026-05-09T${10 + i}:00:00.000Z`,
         model: 'test',
         type: 'hallucination',
@@ -123,14 +123,14 @@ describe('ErrorJournal', () => {
       });
     }
 
-    const entries = smallJournal.getEntries();
+    const entries = await smallJournal.getEntries();
     expect(entries).toHaveLength(3); // Apenas os 3 últimos
     expect(entries[0].description).toBe('Erro 5'); // Mais recente
     expect(entries[2].description).toBe('Erro 3'); // Mais antigo dos 3
   });
 
-  it('deve retornar stats corretas', () => {
-    journal.addEntry({
+  it('deve retornar stats corretas', async () => {
+    await journal.addEntry({
       timestamp: '2026-05-09T10:00:00.000Z',
       model: 'test',
       type: 'hallucination',
@@ -140,7 +140,7 @@ describe('ErrorJournal', () => {
       correctedLength: 15,
     });
 
-    journal.addEntry({
+    await journal.addEntry({
       timestamp: '2026-05-09T11:00:00.000Z',
       model: 'test',
       type: 'syntax',
@@ -150,7 +150,7 @@ describe('ErrorJournal', () => {
       correctedLength: 25,
     });
 
-    journal.addEntry({
+    await journal.addEntry({
       timestamp: '2026-05-09T12:00:00.000Z',
       model: 'test',
       type: 'hallucination',
@@ -160,27 +160,27 @@ describe('ErrorJournal', () => {
       correctedLength: 35,
     });
 
-    const stats = journal.getStats();
+    const stats = await journal.getStats();
     expect(stats.total).toBe(3);
     expect(stats.byType).toEqual({ hallucination: 2, syntax: 1 });
     expect(stats.byStatus).toEqual({ stable: 2, suspicious: 1 });
     expect(stats.lastEntry).toBe('2026-05-09T12:00:00.000Z');
   });
 
-  it('deve carregar de arquivo corrompido retornando vazio', () => {
+  it('deve carregar de arquivo corrompido retornando vazio', async () => {
     // Cria arquivo inválido
     fs.mkdirSync(testDir, { recursive: true });
     fs.writeFileSync(testFile, 'invalid json', 'utf-8');
 
-    const loaded = journal.getEntries();
+    const loaded = await journal.getEntries();
     expect(loaded).toEqual([]);
   });
 
-  it('deve carregar de arquivo com versão inválida retornando vazio', () => {
+  it('deve carregar de arquivo com versão inválida retornando vazio', async () => {
     fs.mkdirSync(testDir, { recursive: true });
     fs.writeFileSync(testFile, JSON.stringify({ version: 999, entries: [] }), 'utf-8');
 
-    const loaded = journal.getEntries();
+    const loaded = await journal.getEntries();
     expect(loaded).toEqual([]);
   });
 });

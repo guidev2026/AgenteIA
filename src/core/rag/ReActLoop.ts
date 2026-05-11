@@ -406,6 +406,9 @@ export class ReActLoop {
           };
           currentHistory = [workingMemoryMsg, ...compressed.keptMessages];
         } else {
+          console.warn(
+            'Aviso: Falha ao comprimir contexto. O histórico mais antigo foi truncado para economizar memória.'
+          );
           currentHistory = compressed.keptMessages;
         }
         wasCompressed = true;
