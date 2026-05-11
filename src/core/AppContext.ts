@@ -27,6 +27,8 @@ import { SessionStore } from './SessionStore';
 import type { ReActMessage } from './rag/ReActLoop';
 import { ASTEditor } from './ASTEditor';
 import { SearchReplaceEditor } from './SearchReplaceEditor';
+import * as fsp from 'node:fs/promises';
+import * as path from 'node:path';
 
 export interface AppContextConfig {
   provider: ProviderConfig;
@@ -213,6 +215,28 @@ export class AppContext {
           );
         }
         return `OK: File "${filePath}" has been updated.`;
+      }
+    );
+
+    // Tool: writeFile — criação/atualização de ficheiros
+    this.toolRegistry.register(
+      'writeFile',
+      'Create or overwrite a file with the given content. Creates parent directories automatically. Returns a success message with the file path.',
+      {
+        filePath: { type: 'string', description: 'Relative or absolute path to the file to create/overwrite' },
+        content: { type: 'string', description: 'Complete text/code content to write into the file' },
+      },
+      async (args) => {
+        const filePath = args.filePath as string;
+        const content = args.content as string;
+        try {
+          const safePath = await FileReader.resolveSecurePath(filePath);
+          await fsp.mkdir(path.dirname(safePath), { recursive: true });
+          await fsp.writeFile(safePath, content, 'utf-8');
+          return `Ficheiro "${filePath}" criado/atualizado com sucesso.`;
+        } catch (err: any) {
+          return `Erro ao escrever ficheiro "${filePath}": ${err.message}`;
+        }
       }
     );
 
