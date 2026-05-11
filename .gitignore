@@ -1,41 +1,6 @@
-# Dependências
 node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# Compilação TypeScript
 dist/
-*.tsbuildinfo
-
-# Ambiente
-.env
-.env.local
-.env.*.local
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# Sistema operacional
-.DS_Store
-Thumbs.db
-
-# Temp test files
-tests/integration/.tmp/
-
-# Logs
-logs/
-*.log
-
-# Outros
-coverage/
-
-# Cache RAG (índice de embeddings)
+dist-electron/
 .soberano/
-
-# Ferramenta Cline (instruções do CTO)
-.clinerules
+*.log
+.DS_Store

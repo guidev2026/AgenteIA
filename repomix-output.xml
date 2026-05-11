@@ -1758,190 +1758,6 @@ export class SessionManager {
 }
 </file>
 
-<file path="src/core/StatefulCompressor.ts">
-/**
- * StatefulCompressor: Implementação do IContextCompressor que usa o próprio
- * modelo de linguagem para condensar o histórico (SRP + DIP).
- *
- * Responsabilidade Única: Pegar um histórico longo de mensagens ReAct e
- * pedir ao modelo que extraia três blocos essenciais (objective, completed,
- * critical_rules), descartando o lixo da conversa e preservando o essencial.
- *
- * ISP (Interface Segregation): Depende apenas de IContextCompressor e IProvider.
- * DIP (Dependency Inversion): Recebe IProvider via construtor, não instancia nada.
- */
-
-import type { IContextCompressor, CompressedContext } from './IContextCompressor';
-import type { IProvider } from '../providers/types';
-import type { ReActMessage } from './rag/ReActLoop';
-
-/** Número de mensagens finais mantidas intactas após compressão */
-const KEEP_LAST = 3;
-
-/**
- * Sistema de prompt usado para instruir o modelo a extrair os três blocos.
- */
-const COMPRESSION_SYSTEM_PROMPT = `You are a conversation compression assistant.
-Your task is to analyze the ReAct conversation history below and extract three critical pieces of information.
-
-Respond with a JSON object ONLY (no markdown, no code fences), containing exactly these three fields:
-{
-  "objective": "What the user is trying to achieve — the main goal and intent",
-  "completed": "What has already been successfully executed — actions taken, tools used, results obtained",
-  "critical_rules": "Constraints, business rules, preferences, or restrictions mentioned during the conversation"
-}
-
-Guidelines:
-- Be concise but complete. Preserve all important details.
-- objective: Focus on the user's end goal, not intermediate steps.
-- completed: List concrete accomplishments, commands run, files created, etc.
-- critical_rules: Include any constraints about tools, formats, dependencies, or behavior.
-- If a section has no content, use an empty string.
-- Return ONLY valid JSON, no other text.`;
-
-/**
- * Formata o histórico como texto para enviar ao modelo.
- */
-function formatHistoryForCompression(history: ReActMessage[]): string {
-  return history
-    .map((msg) => {
-      const prefix = msg.role === 'user' ? 'USER' : msg.role === 'assistant' ? 'ASSISTANT' : 'SYSTEM';
-      return `[${prefix}]\n${msg.content}`;
-    })
-    .join('\n\n');
-}
-
-/**
- * Formata o JSON parseado como Markdown estruturado para workingMemory.
- */
-function formatWorkingMemory(
-  objective: string,
-  completed: string,
-  criticalRules: string,
-): string {
-  const parts: string[] = [];
-
-  if (objective) {
-    parts.push(`## Objective\n${objective}`);
-  }
-
-  if (completed) {
-    parts.push(`## Completed\n${completed}`);
-  }
-
-  if (criticalRules) {
-    parts.push(`## Critical Rules\n${criticalRules}`);
-  }
-
-  return parts.length > 0 ? parts.join('\n\n') : '*(compressed context — no significant content extracted)*';
-}
-
-/**
- * Calcula a taxa de compressão: 0.0 (sem compressão) a 1.0 (100% comprimido).
- *
- * @param originalLength - Tamanho total do histórico original em caracteres
- * @param compressedLength - Tamanho do workingMemory em caracteres
- * @returns Taxa de compressão entre 0.0 e 1.0
- */
-function computeCompressionRatio(originalLength: number, compressedLength: number): number {
-  if (originalLength <= 0) return 0.0;
-  const ratio = 1.0 - compressedLength / originalLength;
-  // Clamp between 0.0 and 1.0
-  return Math.max(0.0, Math.min(1.0, ratio));
-}
-
-export class StatefulCompressor implements IContextCompressor {
-  private readonly provider: IProvider;
-
-  constructor(provider: IProvider) {
-    this.provider = provider;
-  }
-
-  /**
-   * Comprime o histórico de mensagens ReAct usando o modelo de linguagem.
-   *
-   * @param history - Array completo de mensagens do histórico
-   * @param _model - Identificador do modelo sendo usado (não usado diretamente, delegado ao provider)
-   * @param _systemPrompt - Prompt de sistema original (usado como contexto adicional)
-   * @returns Promise com o contexto comprimido
-   */
-  async compress(
-    history: ReActMessage[],
-    _model: string,
-    _systemPrompt: string,
-  ): Promise<CompressedContext> {
-    // Sempre preservar as últimas KEEP_LAST mensagens intactas
-    const keptMessages = history.slice(-KEEP_LAST);
-    const historicalMessages = history.slice(0, -KEEP_LAST);
-
-    // Se não há histórico suficiente para comprimir, retorna sem compressão
-    if (historicalMessages.length === 0) {
-      return {
-        workingMemory: '',
-        keptMessages: history,
-        compressionRatio: 1.0,
-      };
-    }
-
-    const originalTotalLength = history.reduce((acc, msg) => acc + msg.content.length, 0);
-    const formattedHistory = formatHistoryForCompression(historicalMessages);
-
-    // Prompt completo: system prompt + histórico + instrução de formato
-    const fullPrompt = `${COMPRESSION_SYSTEM_PROMPT}\n\nConversation history:\n${formattedHistory}`;
-
-    try {
-      const response = await this.provider.chat({
-        model: _model,
-        prompt: fullPrompt,
-        temperature: 0.1,
-        format: 'json',
-      });
-
-      // Parse da resposta JSON
-      let parsed: Record<string, unknown>;
-      try {
-        parsed = JSON.parse(response.response);
-      } catch {
-        // Falha no parse JSON — loga erro e retorna sem compressão
-        console.error(
-          `[StatefulCompressor] JSON parse error: resposta do modelo não é JSON válido. Resposta bruta: ${response.response.substring(0, 200)}`,
-        );
-        return {
-          workingMemory: '',
-          keptMessages: history,
-          compressionRatio: 1.0,
-        };
-      }
-
-      // Extrair campos (com fallback para string vazia)
-      const objective = typeof parsed.objective === 'string' ? parsed.objective : '';
-      const completed = typeof parsed.completed === 'string' ? parsed.completed : '';
-      const criticalRules = typeof parsed.critical_rules === 'string' ? parsed.critical_rules : '';
-
-      const workingMemory = formatWorkingMemory(objective, completed, criticalRules);
-      const compressedLength = workingMemory.length;
-      const compressionRatio = computeCompressionRatio(originalTotalLength, compressedLength);
-
-      return {
-        workingMemory,
-        keptMessages,
-        compressionRatio,
-      };
-    } catch (err) {
-      // Provider lançou exceção (ex: limite de contexto) — loga erro e
-      // trunca mecanicamente para evitar loop infinito no ReAct.
-      const errorMessage = err instanceof Error ? err.message : String(err);
-      console.error(`[StatefulCompressor] Provider error: ${errorMessage} — truncando histórico para ${KEEP_LAST} mensagens.`);
-      return {
-        workingMemory: '',
-        keptMessages: history.slice(-KEEP_LAST),
-        compressionRatio: 1.0,
-      };
-    }
-  }
-}
-</file>
-
 <file path="src/core/TokenEstimator.ts">
 /**
  * TokenEstimator — Estimador de tokens nativo e sem dependências.
@@ -2386,302 +2202,6 @@ export class JsonValidator {
     }
   }
 }
-</file>
-
-<file path="tests/integration/editing-pipeline.test.ts">
-/**
- * editing-pipeline.test.ts — Teste de Integração do Pipeline Completo de Edição.
- *
- * ═══════════════════════════════════════════════════════════════════════════
- * AVISO: Este é o ÚNICO conjunto de testes neste projeto que acessa o
- * filesystem real (cria, lê, edita e deleta arquivos em disco).
- * Todos os demais testes usam mocks para FileReader / fs.
- * ═══════════════════════════════════════════════════════════════════════════
- *
- * Pipeline simulado:
- * 1. Cria arquivo TypeScript temporário em os.tmpdir()
- * 2. ASTEditor.replaceSymbol() → substitui função por nome de símbolo
- * 3. Verifica que o arquivo foi alterado corretamente
- * 4. Cria arquivo não-TypeScript (texto) temporário
- * 5. SearchReplaceEditor.apply() → substitui bloco exato
- * 6. Verifica que o arquivo foi alterado corretamente
- * 7. Limpeza: afterEach deleta todos os arquivos temporários
- */
-
-import { describe, it, expect, afterEach } from 'vitest';
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
-import * as os from 'node:os';
-import { FileReader } from '../../src/core/FileReader';
-import { ASTEditor } from '../../src/core/ASTEditor';
-import { SearchReplaceEditor } from '../../src/core/SearchReplaceEditor';
-
-// ── Helpers ──────────────────────────────────────────────────────
-
-const tmpFiles: string[] = [];
-
-/** Cria um arquivo temporário com conteúdo e registra para limpeza */
-async function createTempFile(filename: string, content: string): Promise<string> {
-  const filePath = path.join(os.tmpdir(), filename);
-  await fs.writeFile(filePath, content, 'utf-8');
-  tmpFiles.push(filePath);
-  return filePath;
-}
-
-/** Lê arquivo como string */
-async function readFile(filePath: string): Promise<string> {
-  return await fs.readFile(filePath, 'utf-8');
-}
-
-// ── Cleanup ──────────────────────────────────────────────────────
-
-afterEach(async () => {
-  for (const f of tmpFiles) {
-    try {
-      await fs.unlink(f);
-    } catch {
-      // Ignora se já foi deletado
-    }
-  }
-  tmpFiles.length = 0;
-});
-
-// ── Testes ───────────────────────────────────────────────────────
-
-describe('Editing Pipeline — Integração com Filesystem Real', () => {
-  // ──────────────────────────────────────────────────────────────────
-  // ASTEditor.replaceSymbol() em arquivo TypeScript
-  // ──────────────────────────────────────────────────────────────────
-  it('deve substituir função TypeScript por símbolo via ASTEditor', async () => {
-    const tsCode = [
-      'function greet(name: string): string {',
-      '  return `Hello, ${name}!`;',
-      '}',
-      '',
-      'function add(a: number, b: number): number {',
-      '  return a + b;',
-      '}',
-      '',
-      'export { greet, add };',
-      '',
-    ].join('\n');
-
-    const filePath = await createTempFile('test-ast-editor.ts', tsCode);
-    const fileReader = new FileReader();
-    const editor = new ASTEditor(fileReader);
-
-    // Substituir a função "add" por uma nova implementação
-    const newAddCode = [
-      'function add(a: number, b: number): number {',
-      '  const result = a + b;',
-      '  console.log(`Adding ${a} + ${b} = ${result}`);',
-      '  return result;',
-      '}',
-    ].join('\n');
-
-    const result = await editor.replaceSymbol(filePath, 'add', newAddCode);
-
-    expect(result.success).toBe(true);
-    expect(result.symbolFound).toBe(true);
-    expect(result.filePath).toBe(filePath);
-    expect(result.symbolName).toBe('add');
-
-    // Verificar conteúdo do arquivo pós-edição
-    const updatedContent = await readFile(filePath);
-    expect(updatedContent).toContain('console.log(`Adding ${a} + ${b} = ${result}`)');
-    expect(updatedContent).toContain('function greet(name: string): string {');
-    expect(updatedContent).toContain('return `Hello, ${name}!`;');
-    expect(updatedContent).toContain('export { greet, add };');
-
-    // A função 'add' original foi substituída — verificar que o código antigo sumiu
-    expect(updatedContent).not.toContain('  return a + b;');
-  });
-
-  it('deve retornar symbolFound false para símbolo inexistente', async () => {
-    const tsCode = [
-      'function exist(): string {',
-      '  return "I exist";',
-      '}',
-      '',
-    ].join('\n');
-
-    const filePath = await createTempFile('test-ast-nonexistent.ts', tsCode);
-    const fileReader = new FileReader();
-    const editor = new ASTEditor(fileReader);
-
-    const result = await editor.replaceSymbol(
-      filePath,
-      'nonExistentFunction',
-      'function nonExistentFunction() { return "new"; }'
-    );
-
-    expect(result.success).toBe(false);
-    expect(result.symbolFound).toBe(false);
-    expect(result.error).toContain('nonExistentFunction');
-  });
-
-  // ──────────────────────────────────────────────────────────────────
-  // SearchReplaceEditor.apply() em arquivo não-TypeScript
-  // ──────────────────────────────────────────────────────────────────
-  it('deve substituir bloco exato via SearchReplaceEditor em arquivo .txt', async () => {
-    const textContent = [
-      '# Configuração do Servidor',
-      '',
-      'PORT=3000',
-      'HOST=localhost',
-      'DEBUG=true',
-      '',
-      '# Fim da configuração',
-      '',
-    ].join('\n');
-
-    const filePath = await createTempFile('test-config.txt', textContent);
-    const fileReader = new FileReader();
-    const editor = new SearchReplaceEditor(fileReader);
-
-    const result = await editor.apply(
-      filePath,
-      'PORT=3000',
-      'PORT=8080'
-    );
-
-    expect(result.success).toBe(true);
-    expect(result.matchCount).toBe(1);
-    expect(result.filePath).toBe(filePath);
-
-    const updatedContent = await readFile(filePath);
-    expect(updatedContent).toContain('PORT=8080');
-    expect(updatedContent).not.toContain('PORT=3000');
-    expect(updatedContent).toContain('HOST=localhost');
-    expect(updatedContent).toContain('DEBUG=true');
-  });
-
-  it('deve substituir bloco multi-linha via SearchReplaceEditor', async () => {
-    const textContent = [
-      '// Dados de conexão',
-      'host: localhost',
-      'port: 5432',
-      'user: admin',
-      '// Fim conexão',
-    ].join('\n');
-
-    const filePath = await createTempFile('test-multiline.yaml', textContent);
-    const fileReader = new FileReader();
-    const editor = new SearchReplaceEditor(fileReader);
-
-    const searchBlock = [
-      'host: localhost',
-      'port: 5432',
-      'user: admin',
-    ].join('\n');
-
-    const replaceBlock = [
-      'host: db.example.com',
-      'port: 5432',
-      'user: readonly_user',
-      'password: secret',
-    ].join('\n');
-
-    const result = await editor.apply(filePath, searchBlock, replaceBlock);
-
-    expect(result.success).toBe(true);
-    expect(result.matchCount).toBe(1);
-
-    const updatedContent = await readFile(filePath);
-    expect(updatedContent).toContain('host: db.example.com');
-    expect(updatedContent).toContain('user: readonly_user');
-    expect(updatedContent).toContain('password: secret');
-    expect(updatedContent).toContain('// Dados de conexão');
-    expect(updatedContent).toContain('// Fim conexão');
-  });
-
-  it('deve retornar matchCount 0 quando bloco não é encontrado', async () => {
-    const textContent = 'linha um\nlinha dois\nlinha tres\n';
-    const filePath = await createTempFile('test-nomatch.txt', textContent);
-    const fileReader = new FileReader();
-    const editor = new SearchReplaceEditor(fileReader);
-
-    const result = await editor.apply(filePath, 'linha quatro', 'linha cinco');
-
-    expect(result.success).toBe(false);
-    expect(result.matchCount).toBe(0);
-    expect(result.error).toContain('não encontrado');
-  });
-
-  // ──────────────────────────────────────────────────────────────────
-  // Pipeline Completo (TypeScript + texto em sequência)
-  // ──────────────────────────────────────────────────────────────────
-  it('deve executar pipeline completo: ASTEditor seguido de SearchReplace', async () => {
-    // ── Etapa 1: Criar um arquivo .ts com função + comentário ──
-    const tsCode = [
-      '// src/calculator.ts',
-      'function multiply(a: number, b: number): number {',
-      '  return a * b;',
-      '}',
-      '',
-      '// TODO: documentar',
-      'function divide(a: number, b: number): number {',
-      '  if (b === 0) throw new Error("Division by zero");',
-      '  return a / b;',
-      '}',
-      '',
-      'export { multiply, divide };',
-    ].join('\n');
-
-    const tsPath = await createTempFile('test-pipeline-calc.ts', tsCode);
-    const fileReader = new FileReader();
-
-    // ── Etapa 2: ASTEditor.replaceSymbol() em "divide" ──
-    const astEditor = new ASTEditor(fileReader);
-    const astResult = await astEditor.replaceSymbol(
-      tsPath,
-      'divide',
-      [
-        'function divide(a: number, b: number): number {',
-        '  if (b === 0) {',
-        '    console.warn("Division by zero detected");',
-        '    return NaN;',
-        '  }',
-        '  return a / b;',
-        '}',
-      ].join('\n')
-    );
-
-    expect(astResult.success).toBe(true);
-    expect(astResult.symbolFound).toBe(true);
-
-    // ── Etapa 3: Verificar alteração AST ──
-    let content = await readFile(tsPath);
-    expect(content).toContain('console.warn("Division by zero detected")');
-    expect(content).toContain('return NaN;');
-    expect(content).toContain('function multiply(a: number, b: number): number {');
-    // '// TODO: documentar' era leading trivia de 'divide', então foi substituído junto
-    expect(content).not.toContain('TODO: documentar');
-
-
-    // ── Etapa 4: SearchReplaceEditor.apply() no mesmo arquivo .ts ──
-    // NOTA: '// TODO: documentar' foi consumido como leading trivia do símbolo 'divide'
-    // no passo AST. Vamos substituir o cabeçalho do arquivo que ainda está intacto.
-    const srEditor = new SearchReplaceEditor(fileReader);
-    const srResult = await srEditor.apply(
-      tsPath,
-      '// src/calculator.ts',
-      '// src/calculator.ts — with NaN-safe divide'
-    );
-
-    expect(srResult.success).toBe(true);
-    expect(srResult.matchCount).toBe(1);
-
-    // ── Etapa 5: Verificar edições combinadas ──
-    content = await readFile(tsPath);
-    expect(content).toContain('console.warn("Division by zero detected")');
-    expect(content).toContain('return NaN;');
-    expect(content).toContain('// src/calculator.ts — with NaN-safe divide');
-    expect(content).not.toContain('// TODO: documentar');
-    expect(content).not.toContain('throw new Error("Division by zero")');
-    expect(content).toContain('export { multiply, divide };');
-  });
-});
 </file>
 
 <file path="tests/unit/core/CommandExecutor.test.ts">
@@ -3238,263 +2758,6 @@ describe('SessionStore', () => {
 
       // Deve resolver sem lançar
       await expect(store.delete('inexistente')).resolves.toBeUndefined();
-    });
-  });
-});
-</file>
-
-<file path="tests/unit/core/StatefulCompressor.test.ts">
-import { describe, it, expect, vi } from 'vitest';
-import { StatefulCompressor } from '../../../src/core/StatefulCompressor';
-import type { IProvider, ChatRequest, ChatResponse } from '../../../src/providers/types';
-import type { ReActMessage } from '../../../src/core/rag/ReActLoop';
-
-/**
- * Cria um mock de IProvider que pode ser configurado por teste.
- */
-function createMockProvider(
-  response?: string,
-  shouldThrow = false,
-  throwMessage = 'Provider error',
-): IProvider {
-  const mock: IProvider = {
-    name: 'mock-provider',
-    chat: vi.fn(async (_request: ChatRequest): Promise<ChatResponse> => {
-      if (shouldThrow) {
-        throw new Error(throwMessage);
-      }
-      return {
-        response: response ?? '',
-        model: 'mock-model',
-        done: true,
-      };
-    }),
-  };
-  return mock;
-}
-
-/**
- * Cria um array de mensagens ReAct para teste.
- */
-function createHistory(count: number): ReActMessage[] {
-  const messages: ReActMessage[] = [];
-  for (let i = 0; i < count; i++) {
-    messages.push({
-      role: i % 2 === 0 ? 'user' : 'assistant',
-      content: `Message ${i + 1}: ${i % 2 === 0 ? 'User says something' : 'Assistant responds'}`,
-    });
-  }
-  return messages;
-}
-
-describe('StatefulCompressor', () => {
-  describe('compress - success scenario', () => {
-    it('deve retornar workingMemory com os tres campos formatados', async () => {
-      const jsonResponse = JSON.stringify({
-        objective: 'Build a CLI tool for file processing',
-        completed: 'Created project structure, implemented file reader',
-        critical_rules: 'Must use zero external dependencies',
-      });
-
-      const provider = createMockProvider(jsonResponse);
-      const compressor = new StatefulCompressor(provider);
-      const history = createHistory(10);
-      const result = await compressor.compress(history, 'test-model', 'system prompt');
-
-      // Verificar workingMemory contém os três campos formatados
-      expect(result.workingMemory).toContain('## Objective');
-      expect(result.workingMemory).toContain('Build a CLI tool for file processing');
-      expect(result.workingMemory).toContain('## Completed');
-      expect(result.workingMemory).toContain('Created project structure, implemented file reader');
-      expect(result.workingMemory).toContain('## Critical Rules');
-      expect(result.workingMemory).toContain('Must use zero external dependencies');
-
-      // Verificar keptMessages tem exatamente as últimas 3 mensagens
-      expect(result.keptMessages).toHaveLength(3);
-      expect(result.keptMessages[0].content).toContain('Message 8');
-      expect(result.keptMessages[1].content).toContain('Message 9');
-      expect(result.keptMessages[2].content).toContain('Message 10');
-
-      // Verificar compressionRatio é menor que 1.0
-      expect(result.compressionRatio).toBeLessThan(1.0);
-      expect(result.compressionRatio).toBeGreaterThan(0.0);
-
-      // Verificar que o provider foi chamado com os parâmetros corretos
-      expect(provider.chat).toHaveBeenCalledTimes(1);
-      const chatRequest = (provider.chat as ReturnType<typeof vi.fn>).mock.calls[0][0] as ChatRequest;
-      expect(chatRequest.temperature).toBe(0.1);
-      expect(chatRequest.format).toBe('json');
-      expect(chatRequest.model).toBe('test-model');
-      expect(chatRequest.prompt).toContain('objective');
-      expect(chatRequest.prompt).toContain('completed');
-      expect(chatRequest.prompt).toContain('critical_rules');
-    });
-
-    it('deve funcionar com campos vazios no JSON', async () => {
-      const jsonResponse = JSON.stringify({
-        objective: '',
-        completed: 'Some work done',
-        critical_rules: '',
-      });
-
-      const provider = createMockProvider(jsonResponse);
-      const compressor = new StatefulCompressor(provider);
-      const history = createHistory(10);
-      const result = await compressor.compress(history, 'test-model', 'system prompt');
-
-      // Apenas campos não-vazios devem aparecer
-      expect(result.workingMemory).not.toContain('## Objective');
-      expect(result.workingMemory).toContain('## Completed');
-      expect(result.workingMemory).not.toContain('## Critical Rules');
-      expect(result.keptMessages).toHaveLength(3);
-    });
-
-    it('deve preservar as ultimas 3 mensagens mesmo com historico grande', async () => {
-      const jsonResponse = JSON.stringify({
-        objective: 'Test',
-        completed: 'Test',
-        critical_rules: 'Test',
-      });
-
-      const provider = createMockProvider(jsonResponse);
-      const compressor = new StatefulCompressor(provider);
-      const history = createHistory(50);
-      const result = await compressor.compress(history, 'test-model', 'system prompt');
-
-      expect(result.keptMessages).toHaveLength(3);
-      expect(result.keptMessages[0].content).toContain('Message 48');
-      expect(result.keptMessages[1].content).toContain('Message 49');
-      expect(result.keptMessages[2].content).toContain('Message 50');
-    });
-  });
-
-  describe('compress - JSON parse failure scenario', () => {
-    it('deve retornar historico original e compressionRatio 1.0 quando JSON é invalido', async () => {
-      // Resposta não-JSON do modelo
-      const provider = createMockProvider('I think the objective is...');
-      const compressor = new StatefulCompressor(provider);
-      const history = createHistory(10);
-      const result = await compressor.compress(history, 'test-model', 'system prompt');
-
-      // Deve retornar o histórico completo em keptMessages
-      expect(result.keptMessages).toHaveLength(10);
-      expect(result.keptMessages).toEqual(history);
-
-      // workingMemory deve ser vazio
-      expect(result.workingMemory).toBe('');
-
-      // compressionRatio deve ser 1.0 (100% comprimido = falhou)
-      expect(result.compressionRatio).toBe(1.0);
-    });
-
-    it('deve retornar historico original e compressionRatio 1.0 quando JSON tem formato errado', async () => {
-      // JSON válido mas sem os campos esperados
-      const provider = createMockProvider('{"foo": "bar", "baz": 123}');
-      const compressor = new StatefulCompressor(provider);
-      const history = createHistory(5);
-      const result = await compressor.compress(history, 'test-model', 'system prompt');
-
-      // Campos vazios → workingMemory com placeholder
-      expect(result.workingMemory).toBe('*(compressed context — no significant content extracted)*');
-      expect(result.keptMessages).toHaveLength(3);
-      expect(result.compressionRatio).toBeGreaterThan(0);
-    });
-
-    it('deve retornar historico completo quando historico tem menos de 4 mensagens', async () => {
-      const provider = createMockProvider('{}');
-      const compressor = new StatefulCompressor(provider);
-      const history = createHistory(3); // Apenas 3 mensagens
-      const result = await compressor.compress(history, 'test-model', 'system prompt');
-
-      // Com 3 mensagens ou menos, histórico vai inteiro pra keptMessages
-      expect(result.keptMessages).toHaveLength(3);
-      expect(result.workingMemory).toBe('');
-      expect(result.compressionRatio).toBe(1.0);
-
-      // Provider não deve ser chamado quando não há o que comprimir
-      expect(provider.chat).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('compress - provider exception scenario', () => {
-    it('deve truncar historico para as ultimas 3 mensagens quando provider lanca excecao', async () => {
-      const provider = createMockProvider('', true, 'Network timeout');
-      const compressor = new StatefulCompressor(provider);
-      const history = createHistory(10);
-      const result = await compressor.compress(history, 'test-model', 'system prompt');
-
-      // Deve retornar apenas as últimas 3 mensagens para evitar loop infinito
-      expect(result.keptMessages).toHaveLength(3);
-      expect(result.keptMessages).toEqual(history.slice(-3));
-
-      // workingMemory deve ser vazio
-      expect(result.workingMemory).toBe('');
-
-      // compressionRatio deve ser 1.0
-      expect(result.compressionRatio).toBe(1.0);
-    });
-
-    it('NUNCA deve lancar excecao para o chamador', async () => {
-      const provider = createMockProvider('', true, 'Critical failure');
-      const compressor = new StatefulCompressor(provider);
-      const history = createHistory(8);
-
-      // Garantir que nenhuma exceção é lançada
-      await expect(
-        compressor.compress(history, 'test-model', 'system prompt'),
-      ).resolves.not.toThrow();
-
-      const result = await compressor.compress(history, 'test-model', 'system prompt');
-      expect(result.keptMessages).toHaveLength(3);
-      expect(result.workingMemory).toBe('');
-      expect(result.compressionRatio).toBe(1.0);
-    });
-  });
-
-  describe('compress - edge cases', () => {
-    it('deve lidar com historico vazio', async () => {
-      const provider = createMockProvider('{}');
-      const compressor = new StatefulCompressor(provider);
-      const result = await compressor.compress([], 'test-model', 'system prompt');
-
-      expect(result.keptMessages).toHaveLength(0);
-      expect(result.workingMemory).toBe('');
-      // Sem histórico, nada foi comprimido — ratio é 1.0 (sem dados processados)
-      expect(result.compressionRatio).toBe(1.0);
-    });
-
-    it('deve tratar campos que nao sao string como vazios', async () => {
-      const jsonResponse = JSON.stringify({
-        objective: 123,
-        completed: null,
-        critical_rules: ['rule1', 'rule2'],
-      });
-
-      const provider = createMockProvider(jsonResponse);
-      const compressor = new StatefulCompressor(provider);
-      const history = createHistory(10);
-      const result = await compressor.compress(history, 'test-model', 'system prompt');
-
-      // Campos não-string devem ser tratados como vazios
-      expect(result.workingMemory).toBe('*(compressed context — no significant content extracted)*');
-    });
-
-    it('deve funcionar com historico exatamente igual a 4 mensagens', async () => {
-      const jsonResponse = JSON.stringify({
-        objective: 'Do something',
-        completed: 'Nothing yet',
-        critical_rules: 'Be careful',
-      });
-
-      const provider = createMockProvider(jsonResponse);
-      const compressor = new StatefulCompressor(provider);
-      const history = createHistory(4); // 1 para comprimir + 3 para keptMessages
-      const result = await compressor.compress(history, 'test-model', 'system prompt');
-
-      expect(result.keptMessages).toHaveLength(3);
-      expect(result.workingMemory).toContain('## Objective');
-      expect(result.compressionRatio).toBeGreaterThan(0);
-      expect(provider.chat).toHaveBeenCalledTimes(1);
     });
   });
 });
@@ -7102,129 +6365,499 @@ export class SessionStore implements ISessionStore {
 }
 </file>
 
-<file path="tests/unit/cli/ChatStrategy.test.ts">
+<file path="src/core/StatefulCompressor.ts">
 /**
- * ChatStrategy.test.ts — Testes para buildSystemPrompt()
+ * StatefulCompressor: Implementação do IContextCompressor que usa o próprio
+ * modelo de linguagem para condensar o histórico (SRP + DIP).
  *
- * Cobertura:
- * - Bloco de workflow de edição aparece quando tools de edição estão registradas
- * - Bloco NÃO aparece sem as tools
- * - Bloco tem no máximo 15 linhas
+ * Responsabilidade Única: Pegar um histórico longo de mensagens ReAct e
+ * pedir ao modelo que extraia três blocos essenciais (objective, completed,
+ * critical_rules), descartando o lixo da conversa e preservando o essencial.
+ *
+ * ISP (Interface Segregation): Depende apenas de IContextCompressor e IProvider.
+ * DIP (Dependency Inversion): Recebe IProvider via construtor, não instancia nada.
  */
 
-import { describe, it, expect, vi } from 'vitest';
-import { buildSystemPrompt } from '../../../src/cli/strategies/ChatStrategy';
-import type { AppContext } from '../../../src/core/AppContext';
+import type { IContextCompressor, CompressedContext } from './IContextCompressor';
+import type { IProvider } from '../providers/types';
+import type { ReActMessage } from './rag/ReActLoop';
 
-// ── Factories ────────────────────────────────────────────────────
+/** Número de mensagens finais mantidas intactas após compressão */
+const KEEP_LAST = 3;
 
-function makeToolRegistry(toolNames: string[]) {
-  return {
-    getDefinitions: () => JSON.stringify(toolNames.map((name) => ({
-      type: 'function',
-      function: { name, description: '', parameters: { type: 'object', properties: {}, required: [] } },
-    })), null, 2),
-    getToolNames: () => [...toolNames],
-    hasTool: (name: string) => toolNames.includes(name),
-    execute: vi.fn(),
-  };
+/**
+ * Sistema de prompt usado para instruir o modelo a extrair os três blocos.
+ */
+const COMPRESSION_SYSTEM_PROMPT = `You are a conversation compression assistant.
+Your task is to analyze the ReAct conversation history below and extract three critical pieces of information.
+
+Respond with a JSON object ONLY (no markdown, no code fences), containing exactly these three fields:
+{
+  "objective": "What the user is trying to achieve — the main goal and intent",
+  "completed": "What has already been successfully executed — actions taken, tools used, results obtained",
+  "critical_rules": "Constraints, business rules, preferences, or restrictions mentioned during the conversation"
 }
 
-function makeMockApp(toolRegistry: ReturnType<typeof makeToolRegistry>): AppContext {
-  return {
-    toolRegistry: toolRegistry as any,
-    fileReader: {} as any,
-    embedProvider: {
-      embed: vi.fn().mockResolvedValue([0.1, 0.2, 0.3]),
-      name: 'mock-embed',
-      chat: vi.fn(),
-    },
-    commandExecutor: {} as any,
-    config: { provider: 'ollama', model: 'test' },
-    llmProvider: {} as any,
-    provider: {} as any,
-    sessionManager: {} as any,
-    getTools: vi.fn() as any,
-  } as unknown as AppContext;
+Guidelines:
+- Be concise but complete. Preserve all important details.
+- objective: Focus on the user's end goal, not intermediate steps.
+- completed: List concrete accomplishments, commands run, files created, etc.
+- critical_rules: Include any constraints about tools, formats, dependencies, or behavior.
+- If a section has no content, use an empty string.
+- Return ONLY valid JSON, no other text.`;
+
+/**
+ * Formata o histórico como texto para enviar ao modelo.
+ */
+function formatHistoryForCompression(history: ReActMessage[]): string {
+  return history
+    .map((msg) => {
+      const prefix = msg.role === 'user' ? 'USER' : msg.role === 'assistant' ? 'ASSISTANT' : 'SYSTEM';
+      return `[${prefix}]\n${msg.content}`;
+    })
+    .join('\n\n');
 }
+
+/**
+ * Formata o JSON parseado como Markdown estruturado para workingMemory.
+ */
+function formatWorkingMemory(
+  objective: string,
+  completed: string,
+  criticalRules: string,
+): string {
+  const parts: string[] = [];
+
+  if (objective) {
+    parts.push(`## Objective\n${objective}`);
+  }
+
+  if (completed) {
+    parts.push(`## Completed\n${completed}`);
+  }
+
+  if (criticalRules) {
+    parts.push(`## Critical Rules\n${criticalRules}`);
+  }
+
+  return parts.length > 0 ? parts.join('\n\n') : '*(compressed context — no significant content extracted)*';
+}
+
+/**
+ * Calcula a taxa de compressão: 0.0 (sem compressão) a 1.0 (100% comprimido).
+ *
+ * @param originalLength - Tamanho total do histórico original em caracteres
+ * @param compressedLength - Tamanho do workingMemory em caracteres
+ * @returns Taxa de compressão entre 0.0 e 1.0
+ */
+function computeCompressionRatio(originalLength: number, compressedLength: number): number {
+  if (originalLength <= 0) return 0.0;
+  const ratio = 1.0 - compressedLength / originalLength;
+  // Clamp between 0.0 and 1.0
+  return Math.max(0.0, Math.min(1.0, ratio));
+}
+
+export class StatefulCompressor implements IContextCompressor {
+  private readonly provider: IProvider;
+
+  constructor(provider: IProvider) {
+    this.provider = provider;
+  }
+
+  /**
+   * Comprime o histórico de mensagens ReAct usando o modelo de linguagem.
+   *
+   * @param history - Array completo de mensagens do histórico
+   * @param _model - Identificador do modelo sendo usado (não usado diretamente, delegado ao provider)
+   * @param _systemPrompt - Prompt de sistema original (usado como contexto adicional)
+   * @returns Promise com o contexto comprimido
+   */
+  async compress(
+    history: ReActMessage[],
+    _model: string,
+    _systemPrompt: string,
+  ): Promise<CompressedContext> {
+    // Sempre preservar as últimas KEEP_LAST mensagens intactas
+    const keptMessages = history.slice(-KEEP_LAST);
+    const historicalMessages = history.slice(0, -KEEP_LAST);
+
+    // Se não há histórico suficiente para comprimir, retorna sem compressão
+    if (historicalMessages.length === 0) {
+      return {
+        workingMemory: '',
+        keptMessages: history,
+        compressionRatio: 1.0,
+      };
+    }
+
+    const originalTotalLength = history.reduce((acc, msg) => acc + msg.content.length, 0);
+    const formattedHistory = formatHistoryForCompression(historicalMessages);
+
+    // Prompt completo: system prompt + histórico + instrução de formato
+    const fullPrompt = `${COMPRESSION_SYSTEM_PROMPT}\n\nConversation history:\n${formattedHistory}`;
+
+    try {
+      const response = await this.provider.chat({
+        model: _model,
+        prompt: fullPrompt,
+        temperature: 0.1,
+        format: 'json',
+      });
+
+      // Parse da resposta JSON
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(response.response);
+      } catch {
+        // Falha no parse JSON — loga erro e retorna sem compressão
+        console.error(
+          `[StatefulCompressor] JSON parse error: resposta do modelo não é JSON válido. Resposta bruta: ${response.response.substring(0, 200)}`,
+        );
+        return {
+          workingMemory: '',
+          keptMessages: history,
+          compressionRatio: 1.0,
+        };
+      }
+
+      // Extrair campos (com fallback para string vazia)
+      const objective = typeof parsed.objective === 'string' ? parsed.objective : '';
+      const completed = typeof parsed.completed === 'string' ? parsed.completed : '';
+      const criticalRules = typeof parsed.critical_rules === 'string' ? parsed.critical_rules : '';
+
+      const workingMemory = formatWorkingMemory(objective, completed, criticalRules);
+      const compressedLength = workingMemory.length;
+      const compressionRatio = computeCompressionRatio(originalTotalLength, compressedLength);
+
+      return {
+        workingMemory,
+        keptMessages,
+        compressionRatio,
+      };
+    } catch (err) {
+      // Provider lançou exceção (ex: limite de contexto) — loga erro e
+      // trunca mecanicamente para evitar loop infinito no ReAct.
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      console.error(`[StatefulCompressor] Provider error: ${errorMessage} — truncando histórico para ${KEEP_LAST} mensagens.`);
+      return {
+        workingMemory: '',
+        keptMessages: history.slice(-KEEP_LAST),
+        compressionRatio: 1.0,
+      };
+    }
+  }
+}
+</file>
+
+<file path="tests/integration/editing-pipeline.test.ts">
+/**
+ * editing-pipeline.test.ts — Teste de Integração do Pipeline Completo de Edição.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * AVISO: Este é o ÚNICO conjunto de testes neste projeto que acessa o
+ * filesystem real (cria, lê, edita e deleta arquivos em disco).
+ * Todos os demais testes usam mocks para FileReader / fs.
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * Pipeline simulado:
+ * 1. Cria arquivo TypeScript temporário em tests/integration/.tmp/
+ * 2. ASTEditor.replaceSymbol() → substitui função por nome de símbolo
+ * 3. Verifica que o arquivo foi alterado corretamente
+ * 4. Cria arquivo não-TypeScript (texto) temporário
+ * 5. SearchReplaceEditor.apply() → substitui bloco exato
+ * 6. Verifica que o arquivo foi alterado corretamente
+ * 7. Limpeza: afterEach deleta todos os arquivos temporários
+ */
+
+import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import { FileReader } from '../../src/core/FileReader';
+import { ASTEditor } from '../../src/core/ASTEditor';
+import { SearchReplaceEditor } from '../../src/core/SearchReplaceEditor';
+
+// ── Helpers ──────────────────────────────────────────────────────
+
+/** Diretório temporário dentro do projeto (respeita FileReader.resolveSecurePath) */
+const TMP_DIR = path.join(process.cwd(), 'tests', 'integration', '.tmp');
+
+const tmpFiles: string[] = [];
+
+/** Cria um arquivo temporário com conteúdo e registra para limpeza */
+async function createTempFile(filename: string, content: string): Promise<string> {
+  await fs.mkdir(TMP_DIR, { recursive: true });
+  const filePath = path.join(TMP_DIR, filename);
+  await fs.writeFile(filePath, content, 'utf-8');
+  tmpFiles.push(filePath);
+  return filePath;
+}
+
+/** Lê arquivo como string */
+async function readFile(filePath: string): Promise<string> {
+  return await fs.readFile(filePath, 'utf-8');
+}
+
+// ── Setup / Teardown ─────────────────────────────────────────────
+
+beforeAll(async () => {
+  await fs.mkdir(TMP_DIR, { recursive: true });
+});
+
+afterAll(async () => {
+  // Remove diretório temporário e todo o seu conteúdo
+  try {
+    await fs.rm(TMP_DIR, { recursive: true, force: true });
+  } catch {
+    // Ignora se já foi removido
+  }
+});
+
+afterEach(async () => {
+  for (const f of tmpFiles) {
+    try {
+      await fs.unlink(f);
+    } catch {
+      // Ignora se já foi deletado
+    }
+  }
+  tmpFiles.length = 0;
+});
 
 // ── Testes ───────────────────────────────────────────────────────
 
-describe('ChatStrategy — buildSystemPrompt', () => {
-  it('deve incluir bloco de workflow quando editSymbol está registrada', async () => {
-    const toolRegistry = makeToolRegistry(['readFile', 'editSymbol', 'executeCommand']);
-    const app = makeMockApp(toolRegistry);
+describe('Editing Pipeline — Integração com Filesystem Real', () => {
+  // ──────────────────────────────────────────────────────────────────
+  // ASTEditor.replaceSymbol() em arquivo TypeScript
+  // ──────────────────────────────────────────────────────────────────
+  it('deve substituir função TypeScript por símbolo via ASTEditor', async () => {
+    const tsCode = [
+      'function greet(name: string): string {',
+      '  return `Hello, ${name}!`;',
+      '}',
+      '',
+      'function add(a: number, b: number): number {',
+      '  return a + b;',
+      '}',
+      '',
+      'export { greet, add };',
+      '',
+    ].join('\n');
 
-    const prompt = await buildSystemPrompt(app, 'teste', false);
+    const filePath = await createTempFile('test-ast-editor.ts', tsCode);
+    const fileReader = new FileReader();
+    const editor = new ASTEditor(fileReader);
 
-    expect(prompt).toContain('WORKFLOW DE EDIÇÃO:');
-    expect(prompt).toContain('NUNCA reescreva um arquivo inteiro');
-    expect(prompt).toContain('readFileForEdit');
-    expect(prompt).toContain('editSymbol');
-    expect(prompt).toContain('searchReplace');
-    expect(prompt).toContain('BLOCK_NOT_FOUND');
+    // Substituir a função "add" por uma nova implementação
+    const newAddCode = [
+      'function add(a: number, b: number): number {',
+      '  const result = a + b;',
+      '  console.log(`Adding ${a} + ${b} = ${result}`);',
+      '  return result;',
+      '}',
+    ].join('\n');
+
+    const result = await editor.replaceSymbol(filePath, 'add', newAddCode);
+
+    expect(result.success).toBe(true);
+    expect(result.symbolFound).toBe(true);
+    expect(result.filePath).toBe(filePath);
+    expect(result.symbolName).toBe('add');
+
+    // Verificar conteúdo do arquivo pós-edição
+    const updatedContent = await readFile(filePath);
+    expect(updatedContent).toContain('console.log(`Adding ${a} + ${b} = ${result}`)');
+    expect(updatedContent).toContain('function greet(name: string): string {');
+    expect(updatedContent).toContain('return `Hello, ${name}!`;');
+    expect(updatedContent).toContain('export { greet, add };');
+
+    // A função 'add' original foi substituída — verificar que o código antigo sumiu
+    expect(updatedContent).not.toContain('  return a + b;');
   });
 
-  it('deve incluir bloco de workflow quando searchReplace está registrada', async () => {
-    const toolRegistry = makeToolRegistry(['readFile', 'searchReplace', 'executeCommand']);
-    const app = makeMockApp(toolRegistry);
+  it('deve retornar symbolFound false para símbolo inexistente', async () => {
+    const tsCode = [
+      'function exist(): string {',
+      '  return "I exist";',
+      '}',
+      '',
+    ].join('\n');
 
-    const prompt = await buildSystemPrompt(app, 'teste', false);
+    const filePath = await createTempFile('test-ast-nonexistent.ts', tsCode);
+    const fileReader = new FileReader();
+    const editor = new ASTEditor(fileReader);
 
-    expect(prompt).toContain('WORKFLOW DE EDIÇÃO:');
+    const result = await editor.replaceSymbol(
+      filePath,
+      'nonExistentFunction',
+      'function nonExistentFunction() { return "new"; }'
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.symbolFound).toBe(false);
+    expect(result.error).toContain('nonExistentFunction');
   });
 
-  it('deve incluir bloco quando ambas as tools de edição estão registradas', async () => {
-    const toolRegistry = makeToolRegistry(['editSymbol', 'searchReplace', 'readFile']);
-    const app = makeMockApp(toolRegistry);
+  // ──────────────────────────────────────────────────────────────────
+  // SearchReplaceEditor.apply() em arquivo não-TypeScript
+  // ──────────────────────────────────────────────────────────────────
+  it('deve substituir bloco exato via SearchReplaceEditor em arquivo .txt', async () => {
+    const textContent = [
+      '# Configuração do Servidor',
+      '',
+      'PORT=3000',
+      'HOST=localhost',
+      'DEBUG=true',
+      '',
+      '# Fim da configuração',
+      '',
+    ].join('\n');
 
-    const prompt = await buildSystemPrompt(app, 'teste', false);
+    const filePath = await createTempFile('test-config.txt', textContent);
+    const fileReader = new FileReader();
+    const editor = new SearchReplaceEditor(fileReader);
 
-    expect(prompt).toContain('WORKFLOW DE EDIÇÃO:');
+    const result = await editor.apply(
+      filePath,
+      'PORT=3000',
+      'PORT=8080'
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.matchCount).toBe(1);
+    expect(result.filePath).toBe(filePath);
+
+    const updatedContent = await readFile(filePath);
+    expect(updatedContent).toContain('PORT=8080');
+    expect(updatedContent).not.toContain('PORT=3000');
+    expect(updatedContent).toContain('HOST=localhost');
+    expect(updatedContent).toContain('DEBUG=true');
   });
 
-  it('NÃO deve incluir bloco de workflow sem tools de edição', async () => {
-    const toolRegistry = makeToolRegistry(['readFile', 'executeCommand']);
-    const app = makeMockApp(toolRegistry);
+  it('deve substituir bloco multi-linha via SearchReplaceEditor', async () => {
+    const textContent = [
+      '// Dados de conexão',
+      'host: localhost',
+      'port: 5432',
+      'user: admin',
+      '// Fim conexão',
+    ].join('\n');
 
-    const prompt = await buildSystemPrompt(app, 'teste', false);
+    const filePath = await createTempFile('test-multiline.yaml', textContent);
+    const fileReader = new FileReader();
+    const editor = new SearchReplaceEditor(fileReader);
 
-    expect(prompt).not.toContain('WORKFLOW DE EDIÇÃO:');
-    expect(prompt).not.toContain('NUNCA reescreva');
+    const searchBlock = [
+      'host: localhost',
+      'port: 5432',
+      'user: admin',
+    ].join('\n');
+
+    const replaceBlock = [
+      'host: db.example.com',
+      'port: 5432',
+      'user: readonly_user',
+      'password: secret',
+    ].join('\n');
+
+    const result = await editor.apply(filePath, searchBlock, replaceBlock);
+
+    expect(result.success).toBe(true);
+    expect(result.matchCount).toBe(1);
+
+    const updatedContent = await readFile(filePath);
+    expect(updatedContent).toContain('host: db.example.com');
+    expect(updatedContent).toContain('user: readonly_user');
+    expect(updatedContent).toContain('password: secret');
+    expect(updatedContent).toContain('// Dados de conexão');
+    expect(updatedContent).toContain('// Fim conexão');
   });
 
-  it('NÃO deve incluir bloco com toolRegistry vazio', async () => {
-    const toolRegistry = makeToolRegistry([]);
-    const app = makeMockApp(toolRegistry);
+  it('deve retornar matchCount 0 quando bloco não é encontrado', async () => {
+    const textContent = 'linha um\nlinha dois\nlinha tres\n';
+    const filePath = await createTempFile('test-nomatch.txt', textContent);
+    const fileReader = new FileReader();
+    const editor = new SearchReplaceEditor(fileReader);
 
-    const prompt = await buildSystemPrompt(app, 'teste', false);
+    const result = await editor.apply(filePath, 'linha quatro', 'linha cinco');
 
-    expect(prompt).not.toContain('WORKFLOW DE EDIÇÃO:');
+    expect(result.success).toBe(false);
+    expect(result.matchCount).toBe(0);
+    // O erro será sobre bloco não encontrado, não sobre caminho negado
+    expect(result.error).toContain('não encontrado');
   });
 
-  it('bloco de workflow deve ter no máximo 15 linhas', async () => {
-    const toolRegistry = makeToolRegistry(['editSymbol', 'searchReplace']);
-    const app = makeMockApp(toolRegistry);
+  // ──────────────────────────────────────────────────────────────────
+  // Pipeline Completo (TypeScript + texto em sequência)
+  // ──────────────────────────────────────────────────────────────────
+  it('deve executar pipeline completo: ASTEditor seguido de SearchReplace', async () => {
+    // ── Etapa 1: Criar um arquivo .ts com função + comentário ──
+    const tsCode = [
+      '// src/calculator.ts',
+      'function multiply(a: number, b: number): number {',
+      '  return a * b;',
+      '}',
+      '',
+      '// TODO: documentar',
+      'function divide(a: number, b: number): number {',
+      '  if (b === 0) throw new Error("Division by zero");',
+      '  return a / b;',
+      '}',
+      '',
+      'export { multiply, divide };',
+    ].join('\n');
 
-    const prompt = await buildSystemPrompt(app, 'teste', false);
+    const tsPath = await createTempFile('test-pipeline-calc.ts', tsCode);
+    const fileReader = new FileReader();
 
-    // Extrai o bloco de workflow
-    const workflowMatch = prompt.match(/WORKFLOW DE EDIÇÃO:[\s\S]*?(?=\n{2,}|$)/);
-    if (workflowMatch) {
-      const lines = workflowMatch[0].split('\n').filter(Boolean);
-      expect(lines.length).toBeLessThanOrEqual(15);
-    }
-  });
+    // ── Etapa 2: ASTEditor.replaceSymbol() em "divide" ──
+    const astEditor = new ASTEditor(fileReader);
+    const astResult = await astEditor.replaceSymbol(
+      tsPath,
+      'divide',
+      [
+        'function divide(a: number, b: number): number {',
+        '  if (b === 0) {',
+        '    console.warn("Division by zero detected");',
+        '    return NaN;',
+        '  }',
+        '  return a / b;',
+        '}',
+      ].join('\n')
+    );
 
-  it('deve continuar funcionando sem RAG (regressão)', async () => {
-    const toolRegistry = makeToolRegistry([]);
-    const app = makeMockApp(toolRegistry);
+    expect(astResult.success).toBe(true);
+    expect(astResult.symbolFound).toBe(true);
 
-    const prompt = await buildSystemPrompt(app, 'teste', false);
+    // ── Etapa 3: Verificar alteração AST ──
+    let content = await readFile(tsPath);
+    expect(content).toContain('console.warn("Division by zero detected")');
+    expect(content).toContain('return NaN;');
+    expect(content).toContain('function multiply(a: number, b: number): number {');
+    // '// TODO: documentar' era leading trivia de 'divide', então foi substituído junto
+    expect(content).not.toContain('TODO: documentar');
 
-    expect(prompt).toContain('Ferramentas disponíveis');
-    expect(prompt).toContain('teste');
-    expect(prompt).toContain('assistente');
+
+    // ── Etapa 4: SearchReplaceEditor.apply() no mesmo arquivo .ts ──
+    // NOTA: '// TODO: documentar' foi consumido como leading trivia do símbolo 'divide'
+    // no passo AST. Vamos substituir o cabeçalho do arquivo que ainda está intacto.
+    const srEditor = new SearchReplaceEditor(fileReader);
+    const srResult = await srEditor.apply(
+      tsPath,
+      '// src/calculator.ts',
+      '// src/calculator.ts — with NaN-safe divide'
+    );
+
+    expect(srResult.success).toBe(true);
+    expect(srResult.matchCount).toBe(1);
+
+    // ── Etapa 5: Verificar edições combinadas ──
+    content = await readFile(tsPath);
+    expect(content).toContain('console.warn("Division by zero detected")');
+    expect(content).toContain('return NaN;');
+    expect(content).toContain('// src/calculator.ts — with NaN-safe divide');
+    expect(content).not.toContain('TODO: documentar');
+    expect(content).not.toContain('throw new Error("Division by zero")');
+    expect(content).toContain('export { multiply, divide };');
   });
 });
 </file>
@@ -7688,6 +7321,263 @@ describe('Reflector', () => {
       // hasError=true mas correctedOutput vazio → mantém original
       expect(result.finalContent).toBe(responseContent);
       expect(result.correctionStatus).toBe('stable');
+    });
+  });
+});
+</file>
+
+<file path="tests/unit/core/StatefulCompressor.test.ts">
+import { describe, it, expect, vi } from 'vitest';
+import { StatefulCompressor } from '../../../src/core/StatefulCompressor';
+import type { IProvider, ChatRequest, ChatResponse } from '../../../src/providers/types';
+import type { ReActMessage } from '../../../src/core/rag/ReActLoop';
+
+/**
+ * Cria um mock de IProvider que pode ser configurado por teste.
+ */
+function createMockProvider(
+  response?: string,
+  shouldThrow = false,
+  throwMessage = 'Provider error',
+): IProvider {
+  const mock: IProvider = {
+    name: 'mock-provider',
+    chat: vi.fn(async (_request: ChatRequest): Promise<ChatResponse> => {
+      if (shouldThrow) {
+        throw new Error(throwMessage);
+      }
+      return {
+        response: response ?? '',
+        model: 'mock-model',
+        done: true,
+      };
+    }),
+  };
+  return mock;
+}
+
+/**
+ * Cria um array de mensagens ReAct para teste.
+ */
+function createHistory(count: number): ReActMessage[] {
+  const messages: ReActMessage[] = [];
+  for (let i = 0; i < count; i++) {
+    messages.push({
+      role: i % 2 === 0 ? 'user' : 'assistant',
+      content: `Message ${i + 1}: ${i % 2 === 0 ? 'User says something' : 'Assistant responds'}`,
+    });
+  }
+  return messages;
+}
+
+describe('StatefulCompressor', () => {
+  describe('compress - success scenario', () => {
+    it('deve retornar workingMemory com os tres campos formatados', async () => {
+      const jsonResponse = JSON.stringify({
+        objective: 'Build a CLI tool for file processing',
+        completed: 'Created project structure, implemented file reader',
+        critical_rules: 'Must use zero external dependencies',
+      });
+
+      const provider = createMockProvider(jsonResponse);
+      const compressor = new StatefulCompressor(provider);
+      const history = createHistory(10);
+      const result = await compressor.compress(history, 'test-model', 'system prompt');
+
+      // Verificar workingMemory contém os três campos formatados
+      expect(result.workingMemory).toContain('## Objective');
+      expect(result.workingMemory).toContain('Build a CLI tool for file processing');
+      expect(result.workingMemory).toContain('## Completed');
+      expect(result.workingMemory).toContain('Created project structure, implemented file reader');
+      expect(result.workingMemory).toContain('## Critical Rules');
+      expect(result.workingMemory).toContain('Must use zero external dependencies');
+
+      // Verificar keptMessages tem exatamente as últimas 3 mensagens
+      expect(result.keptMessages).toHaveLength(3);
+      expect(result.keptMessages[0].content).toContain('Message 8');
+      expect(result.keptMessages[1].content).toContain('Message 9');
+      expect(result.keptMessages[2].content).toContain('Message 10');
+
+      // Verificar compressionRatio é menor que 1.0
+      expect(result.compressionRatio).toBeLessThan(1.0);
+      expect(result.compressionRatio).toBeGreaterThan(0.0);
+
+      // Verificar que o provider foi chamado com os parâmetros corretos
+      expect(provider.chat).toHaveBeenCalledTimes(1);
+      const chatRequest = (provider.chat as ReturnType<typeof vi.fn>).mock.calls[0][0] as ChatRequest;
+      expect(chatRequest.temperature).toBe(0.1);
+      expect(chatRequest.format).toBe('json');
+      expect(chatRequest.model).toBe('test-model');
+      expect(chatRequest.prompt).toContain('objective');
+      expect(chatRequest.prompt).toContain('completed');
+      expect(chatRequest.prompt).toContain('critical_rules');
+    });
+
+    it('deve funcionar com campos vazios no JSON', async () => {
+      const jsonResponse = JSON.stringify({
+        objective: '',
+        completed: 'Some work done',
+        critical_rules: '',
+      });
+
+      const provider = createMockProvider(jsonResponse);
+      const compressor = new StatefulCompressor(provider);
+      const history = createHistory(10);
+      const result = await compressor.compress(history, 'test-model', 'system prompt');
+
+      // Apenas campos não-vazios devem aparecer
+      expect(result.workingMemory).not.toContain('## Objective');
+      expect(result.workingMemory).toContain('## Completed');
+      expect(result.workingMemory).not.toContain('## Critical Rules');
+      expect(result.keptMessages).toHaveLength(3);
+    });
+
+    it('deve preservar as ultimas 3 mensagens mesmo com historico grande', async () => {
+      const jsonResponse = JSON.stringify({
+        objective: 'Test',
+        completed: 'Test',
+        critical_rules: 'Test',
+      });
+
+      const provider = createMockProvider(jsonResponse);
+      const compressor = new StatefulCompressor(provider);
+      const history = createHistory(50);
+      const result = await compressor.compress(history, 'test-model', 'system prompt');
+
+      expect(result.keptMessages).toHaveLength(3);
+      expect(result.keptMessages[0].content).toContain('Message 48');
+      expect(result.keptMessages[1].content).toContain('Message 49');
+      expect(result.keptMessages[2].content).toContain('Message 50');
+    });
+  });
+
+  describe('compress - JSON parse failure scenario', () => {
+    it('deve retornar historico original e compressionRatio 1.0 quando JSON é invalido', async () => {
+      // Resposta não-JSON do modelo
+      const provider = createMockProvider('I think the objective is...');
+      const compressor = new StatefulCompressor(provider);
+      const history = createHistory(10);
+      const result = await compressor.compress(history, 'test-model', 'system prompt');
+
+      // Deve retornar o histórico completo em keptMessages
+      expect(result.keptMessages).toHaveLength(10);
+      expect(result.keptMessages).toEqual(history);
+
+      // workingMemory deve ser vazio
+      expect(result.workingMemory).toBe('');
+
+      // compressionRatio deve ser 1.0 (100% comprimido = falhou)
+      expect(result.compressionRatio).toBe(1.0);
+    });
+
+    it('deve retornar historico original e compressionRatio 1.0 quando JSON tem formato errado', async () => {
+      // JSON válido mas sem os campos esperados
+      const provider = createMockProvider('{"foo": "bar", "baz": 123}');
+      const compressor = new StatefulCompressor(provider);
+      const history = createHistory(5);
+      const result = await compressor.compress(history, 'test-model', 'system prompt');
+
+      // Campos vazios → workingMemory com placeholder
+      expect(result.workingMemory).toBe('*(compressed context — no significant content extracted)*');
+      expect(result.keptMessages).toHaveLength(3);
+      expect(result.compressionRatio).toBeGreaterThan(0);
+    });
+
+    it('deve retornar historico completo quando historico tem menos de 4 mensagens', async () => {
+      const provider = createMockProvider('{}');
+      const compressor = new StatefulCompressor(provider);
+      const history = createHistory(3); // Apenas 3 mensagens
+      const result = await compressor.compress(history, 'test-model', 'system prompt');
+
+      // Com 3 mensagens ou menos, histórico vai inteiro pra keptMessages
+      expect(result.keptMessages).toHaveLength(3);
+      expect(result.workingMemory).toBe('');
+      expect(result.compressionRatio).toBe(1.0);
+
+      // Provider não deve ser chamado quando não há o que comprimir
+      expect(provider.chat).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('compress - provider exception scenario', () => {
+    it('deve truncar historico para as ultimas 3 mensagens quando provider lanca excecao', async () => {
+      const provider = createMockProvider('', true, 'Network timeout');
+      const compressor = new StatefulCompressor(provider);
+      const history = createHistory(10);
+      const result = await compressor.compress(history, 'test-model', 'system prompt');
+
+      // Deve retornar apenas as últimas 3 mensagens para evitar loop infinito
+      expect(result.keptMessages).toHaveLength(3);
+      expect(result.keptMessages).toEqual(history.slice(-3));
+
+      // workingMemory deve ser vazio
+      expect(result.workingMemory).toBe('');
+
+      // compressionRatio deve ser 1.0
+      expect(result.compressionRatio).toBe(1.0);
+    });
+
+    it('NUNCA deve lancar excecao para o chamador', async () => {
+      const provider = createMockProvider('', true, 'Critical failure');
+      const compressor = new StatefulCompressor(provider);
+      const history = createHistory(8);
+
+      // Garantir que nenhuma exceção é lançada
+      await expect(
+        compressor.compress(history, 'test-model', 'system prompt'),
+      ).resolves.not.toThrow();
+
+      const result = await compressor.compress(history, 'test-model', 'system prompt');
+      expect(result.keptMessages).toHaveLength(3);
+      expect(result.workingMemory).toBe('');
+      expect(result.compressionRatio).toBe(1.0);
+    });
+  });
+
+  describe('compress - edge cases', () => {
+    it('deve lidar com historico vazio', async () => {
+      const provider = createMockProvider('{}');
+      const compressor = new StatefulCompressor(provider);
+      const result = await compressor.compress([], 'test-model', 'system prompt');
+
+      expect(result.keptMessages).toHaveLength(0);
+      expect(result.workingMemory).toBe('');
+      // Sem histórico, nada foi comprimido — ratio é 1.0 (sem dados processados)
+      expect(result.compressionRatio).toBe(1.0);
+    });
+
+    it('deve tratar campos que nao sao string como vazios', async () => {
+      const jsonResponse = JSON.stringify({
+        objective: 123,
+        completed: null,
+        critical_rules: ['rule1', 'rule2'],
+      });
+
+      const provider = createMockProvider(jsonResponse);
+      const compressor = new StatefulCompressor(provider);
+      const history = createHistory(10);
+      const result = await compressor.compress(history, 'test-model', 'system prompt');
+
+      // Campos não-string devem ser tratados como vazios
+      expect(result.workingMemory).toBe('*(compressed context — no significant content extracted)*');
+    });
+
+    it('deve funcionar com historico exatamente igual a 4 mensagens', async () => {
+      const jsonResponse = JSON.stringify({
+        objective: 'Do something',
+        completed: 'Nothing yet',
+        critical_rules: 'Be careful',
+      });
+
+      const provider = createMockProvider(jsonResponse);
+      const compressor = new StatefulCompressor(provider);
+      const history = createHistory(4); // 1 para comprimir + 3 para keptMessages
+      const result = await compressor.compress(history, 'test-model', 'system prompt');
+
+      expect(result.keptMessages).toHaveLength(3);
+      expect(result.workingMemory).toContain('## Objective');
+      expect(result.compressionRatio).toBeGreaterThan(0);
+      expect(provider.chat).toHaveBeenCalledTimes(1);
     });
   });
 });
@@ -8557,6 +8447,149 @@ export class ASTEditor {
 }
 </file>
 
+<file path="tests/unit/cli/ChatStrategy.test.ts">
+/**
+ * ChatStrategy.test.ts — Testes para buildSystemPrompt()
+ *
+ * Cobertura:
+ * - Bloco de workflow de edição aparece quando tools de edição estão registradas
+ * - Bloco NÃO aparece sem as tools
+ * - Bloco tem no máximo 15 linhas
+ */
+
+import { describe, it, expect, vi } from 'vitest';
+import { buildSystemPrompt } from '../../../src/cli/strategies/ChatStrategy';
+import type { AppContext } from '../../../src/core/AppContext';
+
+// ── Factories ────────────────────────────────────────────────────
+
+function makeToolRegistry(toolNames: string[]) {
+  return {
+    getDefinitions: () => JSON.stringify(toolNames.map((name) => ({
+      type: 'function',
+      function: { name, description: '', parameters: { type: 'object', properties: {}, required: [] } },
+    })), null, 2),
+    getToolNames: () => [...toolNames],
+    hasTool: (name: string) => toolNames.includes(name),
+    execute: vi.fn(),
+  };
+}
+
+function makeMockApp(toolRegistry: ReturnType<typeof makeToolRegistry>): AppContext {
+  return {
+    toolRegistry: toolRegistry as any,
+    fileReader: {} as any,
+    embedProvider: {
+      embed: vi.fn().mockResolvedValue([0.1, 0.2, 0.3]),
+      name: 'mock-embed',
+      chat: vi.fn(),
+    },
+    commandExecutor: {} as any,
+    config: { provider: 'ollama', model: 'test' },
+    llmProvider: {} as any,
+    provider: {} as any,
+    sessionManager: {} as any,
+    getTools: vi.fn() as any,
+  } as unknown as AppContext;
+}
+
+// ── Testes ───────────────────────────────────────────────────────
+
+describe('ChatStrategy — buildSystemPrompt', () => {
+  it('deve incluir bloco de workflow quando editSymbol está registrada', async () => {
+    const toolRegistry = makeToolRegistry(['readFile', 'editSymbol', 'executeCommand']);
+    const app = makeMockApp(toolRegistry);
+
+    const prompt = await buildSystemPrompt(app, 'teste', false);
+
+    expect(prompt).toContain('WORKFLOW DE EDIÇÃO:');
+    expect(prompt).toContain('NUNCA reescreva um arquivo inteiro');
+    expect(prompt).toContain('readFileForEdit');
+    expect(prompt).toContain('editSymbol');
+    expect(prompt).toContain('searchReplace');
+    expect(prompt).toContain('BLOCK_NOT_FOUND');
+  });
+
+  it('deve incluir bloco de workflow quando searchReplace está registrada', async () => {
+    const toolRegistry = makeToolRegistry(['readFile', 'searchReplace', 'executeCommand']);
+    const app = makeMockApp(toolRegistry);
+
+    const prompt = await buildSystemPrompt(app, 'teste', false);
+
+    expect(prompt).toContain('WORKFLOW DE EDIÇÃO:');
+  });
+
+  it('deve incluir bloco quando ambas as tools de edição estão registradas', async () => {
+    const toolRegistry = makeToolRegistry(['editSymbol', 'searchReplace', 'readFile']);
+    const app = makeMockApp(toolRegistry);
+
+    const prompt = await buildSystemPrompt(app, 'teste', false);
+
+    expect(prompt).toContain('WORKFLOW DE EDIÇÃO:');
+  });
+
+  it('NÃO deve incluir bloco de workflow sem tools de edição', async () => {
+    const toolRegistry = makeToolRegistry(['readFile', 'executeCommand']);
+    const app = makeMockApp(toolRegistry);
+
+    const prompt = await buildSystemPrompt(app, 'teste', false);
+
+    expect(prompt).not.toContain('WORKFLOW DE EDIÇÃO:');
+    expect(prompt).not.toContain('NUNCA reescreva');
+  });
+
+  it('NÃO deve incluir bloco com toolRegistry vazio', async () => {
+    const toolRegistry = makeToolRegistry([]);
+    const app = makeMockApp(toolRegistry);
+
+    const prompt = await buildSystemPrompt(app, 'teste', false);
+
+    expect(prompt).not.toContain('WORKFLOW DE EDIÇÃO:');
+  });
+
+  it('deve incluir WORKFLOW DE ENGENHARIA OBRIGATÓRIO mesmo sem ferramentas de edição', async () => {
+    const toolRegistry = makeToolRegistry([]);
+    const app = makeMockApp(toolRegistry);
+
+    const prompt = await buildSystemPrompt(app, 'teste', false);
+
+    expect(prompt).toContain('WORKFLOW DE ENGENHARIA OBRIGATÓRIO:');
+    expect(prompt).toContain('PASSO 1 (Contexto)');
+    expect(prompt).toContain('PASSO 2 (Execução)');
+    expect(prompt).toContain('PASSO 3 (Validação Autônoma)');
+    expect(prompt).toContain('PASSO 4 (Auto-Correção)');
+    expect(prompt).toContain('PASSO 5 (Conclusão)');
+    expect(prompt).toContain('NUNCA DÊ A RESPOSTA FINAL');
+    expect(prompt).toContain('TU ÉS OBRIGATÓRIO');
+  });
+
+  it('bloco de workflow deve ter no máximo 15 linhas', async () => {
+    const toolRegistry = makeToolRegistry(['editSymbol', 'searchReplace']);
+    const app = makeMockApp(toolRegistry);
+
+    const prompt = await buildSystemPrompt(app, 'teste', false);
+
+    // Extrai o bloco de workflow
+    const workflowMatch = prompt.match(/WORKFLOW DE EDIÇÃO:[\s\S]*?(?=\n{2,}|$)/);
+    if (workflowMatch) {
+      const lines = workflowMatch[0].split('\n').filter(Boolean);
+      expect(lines.length).toBeLessThanOrEqual(15);
+    }
+  });
+
+  it('deve continuar funcionando sem RAG (regressão)', async () => {
+    const toolRegistry = makeToolRegistry([]);
+    const app = makeMockApp(toolRegistry);
+
+    const prompt = await buildSystemPrompt(app, 'teste', false);
+
+    expect(prompt).toContain('Ferramentas disponíveis');
+    expect(prompt).toContain('teste');
+    expect(prompt).toContain('assistente');
+  });
+});
+</file>
+
 <file path="tests/unit/core/ASTEditor.test.ts">
 /**
  * Tests for ASTEditor — Edição estrutural por nome de símbolo.
@@ -9026,47 +9059,6 @@ describe('SearchReplaceEditor', () => {
 });
 </file>
 
-<file path=".gitignore">
-# Dependências
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# Compilação TypeScript
-dist/
-*.tsbuildinfo
-
-# Ambiente
-.env
-.env.local
-.env.*.local
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# Sistema operacional
-.DS_Store
-Thumbs.db
-
-# Logs
-logs/
-*.log
-
-# Outros
-coverage/
-
-# Cache RAG (índice de embeddings)
-.soberano/
-
-# Ferramenta Cline (instruções do CTO)
-.clinerules
-</file>
-
 <file path="package.json">
 {
   "name": "soberano-core",
@@ -9096,157 +9088,6 @@ coverage/
     "ts-node": "^10.9.2",
     "vitest": "^4.1.5"
   }
-}
-</file>
-
-<file path="src/cli/strategies/ChatStrategy.ts">
-/**
- * ChatStrategy — Interface Strategy para modos de chat no CLI.
- *
- * SRP: Cada estratégia encapsula um pipeline de chat diferente:
- *   - StreamStrategy: streaming direto (sem ReAct)
- *   - ReActStrategy: ReAct loop (com ou sem streaming pós-resposta)
- *
- * OCP: Novos modos de chat são adicionados criando novas classes
- * que implementam ChatStrategy, sem modificar as existentes.
- */
-
-import { AppContext, ReActLoop, RAGManager } from '../../core';
-import type { IProvider } from '../../providers/types';
-
-/** Contexto compartilhado entre todas as estratégias de chat */
-export interface ChatContext {
-  app: AppContext;
-  prompt: string;
-  streamMode: boolean;
-  noThink: boolean;
-  /** Se true, aplica Reflector (self-correction) pós-resposta */
-  reflectMode: boolean;
-}
-
-/** Interface base para todas as estratégias de chat */
-export interface ChatStrategy {
-  /** Executa o pipeline de chat e retorna a resposta final formatada */
-  execute(ctx: ChatContext): Promise<string>;
-}
-
-/**
- * Constrói o system prompt completo (tool definitions + RAG + JSON rules).
- *
- * Extraída para função pura (SRP) — testável isoladamente.
- *
- * @param app     AppContext (provider, toolRegistry, commandExecutor, etc.)
- * @param prompt  Prompt do usuário
- * @param jsonMode Se true, adiciona regras de resposta em formato JSON
- * @param ragDir  Diretório RAG opcional
- * @param skipPromptSuffix Se true, não adiciona o sufixo "Pergunta do usuário" —
- *                         útil quando o prompt já está no histórico da sessão
- * @returns System prompt completo
- */
-export async function buildSystemPrompt(
-  app: AppContext,
-  prompt: string,
-  jsonMode: boolean,
-  ragDir?: string,
-  skipPromptSuffix?: boolean
-): Promise<string> {
-  const { toolRegistry, fileReader, embedProvider } = app;
-
-  // ── RAG (Retrieval-Augmented Generation) ──
-  let ragContext = '';
-  if (ragDir) {
-    try {
-      const ragManager = RAGManager.create(fileReader, embedProvider);
-      console.error(`📚 Indexando ${ragDir}...`);
-      await ragManager.ensureIndex(ragDir);
-      console.error(`🔍 Buscando contexto relevante para: "${prompt}"`);
-      const matches = await ragManager.retrieve(prompt, ragDir);
-      ragContext = ragManager.formatContext(matches);
-      if (ragContext) {
-        console.error(
-          `✅ ${matches.length} trechos relevantes encontrados ` +
-          `(total: ~${ragContext.length} chars)`
-        );
-      } else {
-        console.error('ℹ️ Nenhum trecho relevante encontrado.');
-      }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`⚠️ RAG error (injetando aviso no contexto): ${msg}`);
-      ragContext = '⚠️ [AVISO DO SISTEMA: Falha ao buscar contexto no RAG. Responda com base apenas no seu conhecimento prévio]';
-    }
-  }
-
-  // ── System Prompt ──
-  const toolDefinitions = toolRegistry.getDefinitions();
-  const toolNames = toolRegistry.getToolNames().join(', ');
-  const toolNameList = toolRegistry.getToolNames();
-
-  const systemPromptParts: string[] = [
-    'Você é um assistente com acesso a ferramentas para ler arquivos e executar comandos.',
-    `Seu diretório de trabalho atual é: ${process.cwd()}`,
-    'Use caminhos relativos a este diretório OU caminhos absolutos.',
-    '',
-    `Ferramentas disponíveis: ${toolNames}`,
-    '',
-    'Definições das ferramentas (JSON Schema):',
-    toolDefinitions,
-  ];
-
-  // ── Bloco condicional de workflow de edição ──
-  const hasEditTools = toolNameList.includes('editSymbol') || toolNameList.includes('searchReplace');
-  if (hasEditTools) {
-    systemPromptParts.push(
-      '',
-      'WORKFLOW DE EDIÇÃO:',
-      '1. NUNCA reescreva um arquivo inteiro — edite apenas os trechos necessários.',
-      '2. Antes de editar, use readFileForEdit para ver o conteúdo atual numerado.',
-      '3. Para TypeScript (.ts): prefira editSymbol (substitui por nome do símbolo).',
-      '4. Para outros formatos: use searchReplace (cópia exata do código, com indentação).',
-      '5. Se searchReplace retornar BLOCK_NOT_FOUND, chame readFileForEdit novamente',
-      '   e tente com um bloco menor e mais específico.',
-      ''
-    );
-  }
-
-  // Injeta contexto RAG no system prompt, se houver
-  if (ragContext) {
-    systemPromptParts.push(
-      '',
-      '─'.repeat(60),
-      'DOCUMENTOS RELEVANTES PARA A PERGUNTA:',
-      '',
-      ragContext,
-      '',
-      '─'.repeat(60),
-      '',
-      'INSTRUÇÕES: Use os documentos acima como contexto para responder.',
-      'Se a resposta estiver nos documentos, cite a fonte ([arquivo:linha]).',
-      'Se não estiver nos documentos, use seu conhecimento geral.',
-      ''
-    );
-  }
-
-  // Se --json estiver ativo, usa formato tool_call / final_response
-  if (jsonMode) {
-    systemPromptParts.push(
-      '',
-      'REGRAS DE RESPOSTA (ESCRITAS EM JSON):',
-      '1. Se precisar usar uma ferramenta, responda APENAS com:',
-      '   {"tool_call": "<nome_da_ferramenta>", "args": {<parametros>}}',
-      '2. Se já tiver a resposta final, responda APENAS com:',
-      '   {"final_response": "<sua resposta completa>"}',
-      '3. NUNCA responda com texto fora do JSON.',
-      '4. NÃO invente informações — use as ferramentas para obter dados reais.',
-      '5. Responda estritamente em formato JSON válido.'
-    );
-  }
-
-  if (!skipPromptSuffix) {
-    systemPromptParts.push('', `Pergunta do usuário: ${prompt}`);
-  }
-
-  return systemPromptParts.join('\n');
 }
 </file>
 
@@ -9891,6 +9732,50 @@ describe('CLI Commands', () => {
 });
 </file>
 
+<file path=".gitignore">
+# Dependências
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Compilação TypeScript
+dist/
+*.tsbuildinfo
+
+# Ambiente
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+
+# Temp test files
+tests/integration/.tmp/
+
+# Logs
+logs/
+*.log
+
+# Outros
+coverage/
+
+# Cache RAG (índice de embeddings)
+.soberano/
+
+# Ferramenta Cline (instruções do CTO)
+.clinerules
+</file>
+
 <file path="src/core/rag/index.ts">
 export { Chunker } from './Chunker';
 export type { ChunkResult } from './IChunker';
@@ -9907,263 +9792,6 @@ export { RAGManager } from './RAGManager';
 export { ReActLoop } from './ReActLoop';
 export type { ReActMessage, ReActResult } from './ReActLoop';
 export * from './graph/index';
-</file>
-
-<file path="src/core/AppContext.ts">
-/**
- * AppContext: Container de injeção de dependência (DIP).
- *
- * Dependency Inversion Principle (DIP):
- * - Módulos de ALTO nível (CLI, comandos) NÃO dependem de módulos de BAIXO nível
- *   (OllamaProvider, FileReader concretos).
- * - Ambos dependem de abstrações (IProvider, FileReader, CommandExecutor).
- * - AppContext é o "ponto de cola" onde as implementações concretas são injetadas.
- *
- * Benefícios:
- * 1. Testabilidade: nos testes unitários, podemos passar mocks/stubs
- *    no lugar das implementações reais.
- * 2. Flexibilidade: para trocar de provider (ex: Ollama → OpenRouter),
- *    basta mudar a fábrica em um único lugar.
- * 3. Configuração por flags CLI: os parâmetros (host, porta) são passados
- *    pelo AppContext, não lidos diretamente dentro do comando.
- */
-
-import type { IProvider, IEmbedProvider } from '../providers/types';
-import { FileReader } from './FileReader';
-import { CommandExecutor } from './CommandExecutor';
-import { ToolRegistry } from './ToolRegistry';
-import { ProviderFactory } from './ProviderFactory';
-import type { ProviderConfig } from './ProviderFactory';
-import { SessionManager } from './SessionManager';
-import { SessionStore } from './SessionStore';
-import type { ReActMessage } from './rag/ReActLoop';
-import { ASTEditor } from './ASTEditor';
-import { SearchReplaceEditor } from './SearchReplaceEditor';
-
-export interface AppContextConfig {
-  provider: ProviderConfig;
-  model?: string;
-  jsonMode?: boolean;
-  ragDir?: string;
-  sessionId?: string;
-  newSession?: boolean;
-}
-
-export class AppContext {
-  public readonly fileReader: FileReader;
-  public readonly commandExecutor: CommandExecutor;
-  public readonly provider: IProvider;
-  public readonly embedProvider: IEmbedProvider;
-  public readonly toolRegistry: ToolRegistry;
-  public readonly model: string;
-  public readonly jsonMode: boolean;
-  public readonly ragDir: string | undefined;
-  public readonly sessionManager: SessionManager;
-
-  constructor(config: AppContextConfig) {
-    // Utilitários base — sempre os mesmos
-    this.fileReader = new FileReader();
-    this.commandExecutor = new CommandExecutor();
-
-    // Provider via fábrica (OCP) — fácil de estender para novos providers
-    this.provider = ProviderFactory.createProvider(config.provider);
-    this.embedProvider = ProviderFactory.createEmbedProvider(config.provider);
-
-    // ToolRegistry — configurado com as tools padrão
-    this.toolRegistry = new ToolRegistry();
-    this.setupDefaultTools();
-
-    // Configurações de execução
-    this.model = config.model ?? 'llama3.2:1b';
-    this.jsonMode = config.jsonMode ?? false;
-    this.ragDir = config.ragDir;
-
-    // SessionManager — gerencia histórico da conversa multi-turn
-    const store = new SessionStore();
-    this.sessionManager = new SessionManager(store);
-
-    // NOTA: initSession NÃO é chamado aqui no construtor para evitar race condition.
-    // Chame app.initialize() após construir o AppContext para carregar/criar a sessão.
-  }
-
-  /**
-   * Inicializa a sessão de conversa (carrega existente ou cria nova).
-   *
-   * Deve ser chamado após a construção do AppContext, antes de usar o sessionManager.
-   * Separar do construtor evita race condition entre initSession() assíncrono
-   * e addMessage() síncrono.
-   *
-   * @param config Configuração original passada no construtor
-   */
-  async initialize(config?: AppContextConfig): Promise<void> {
-    const sessionId = config?.sessionId;
-    const newSession = config?.newSession;
-    if (!sessionId && !newSession) return; // Nada a inicializar
-    await this.initSession(sessionId, newSession);
-  }
-
-  private async initSession(sessionId?: string, newSession?: boolean): Promise<void> {
-    if (newSession) {
-      await this.sessionManager.newSession(this.model);
-    } else if (sessionId) {
-      const loaded = await this.sessionManager.loadSession(sessionId);
-      if (!loaded) {
-        console.warn(`[AppContext] Sessão "${sessionId}" não encontrada. Criando nova.`);
-        await this.sessionManager.newSession(this.model);
-      }
-    }
-  }
-
-  /**
-   * Helper para obter o histórico de mensagens da sessão ativa.
-   * Retorna array vazio se não houver sessão ativa.
-   */
-  getSessionHistory(): ReActMessage[] {
-    return this.sessionManager.getHistory();
-  }
-
-  /**
-   * Registra as tools padrão disponíveis para o ReAct loop.
-   * São injetadas via DI, mas configuradas com as dependências reais.
-   */
-  private setupDefaultTools(): void {
-    const reader = this.fileReader;
-    const executor = this.commandExecutor;
-
-    // Tool: readFile
-    this.toolRegistry.register(
-      'readFile',
-      'Read the complete contents of a file from disk',
-      {
-        filePath: { type: 'string', description: 'Absolute or relative path to the file' },
-      },
-      async (args) => reader.readFile(args.filePath as string)
-    );
-
-    // Tool: readDir
-    this.toolRegistry.register(
-      'readDir',
-      'List all files and directories inside a directory',
-      {
-        dirPath: { type: 'string', description: 'Absolute or relative path to the directory' },
-      },
-      async (args) => {
-        const entries = await reader.readDir(args.dirPath as string);
-        return entries.join('\n');
-      }
-    );
-
-    // Tool: execute
-    this.toolRegistry.register(
-      'execute',
-      'Execute a shell command safely (no shell injection). Returns stdout.',
-      {
-        command: { type: 'string', description: 'The executable name (e.g., ls, git, node)' },
-        args: { type: 'array', description: 'Arguments as array of strings, e.g. ["-la"]' },
-      },
-      async (toolArgs) => {
-        const cmd = toolArgs.command as string;
-        const rawArgs = toolArgs.args;
-        const cmdArgs: string[] = Array.isArray(rawArgs)
-          ? rawArgs.map(String)
-          : typeof rawArgs === 'string'
-            ? rawArgs.split(' ')
-            : [];
-        const result = await executor.execute(cmd, cmdArgs);
-        return result.stdout || result.stderr || '(no output)';
-      }
-    );
-
-    // Tool: editSymbol — edição estrutural de símbolos TypeScript via AST
-    this.toolRegistry.register(
-      'editSymbol',
-      'Replace a top-level symbol (function, class, interface, variable) in a TypeScript file by name. The symbol must exist in the file. Returns a confirmation with the symbol name and file path on success.',
-      {
-        filePath: { type: 'string', description: 'Absolute or relative path to the .ts file' },
-        symbolName: { type: 'string', description: 'Name of the top-level symbol to replace' },
-        newCode: { type: 'string', description: 'Complete new source code for the symbol' },
-      },
-      async (args) => {
-        const filePath = args.filePath as string;
-        const symbolName = args.symbolName as string;
-        const newCode = args.newCode as string;
-        const astEditor = new ASTEditor(reader);
-        const result = await astEditor.replaceSymbol(filePath, symbolName, newCode);
-        if (!result.success) {
-          throw new Error(
-            `editSymbol failed for symbol "${symbolName}" in "${filePath}": ${result.error}`
-          );
-        }
-        return `OK: Symbol "${symbolName}" in "${filePath}" has been replaced successfully.`;
-      }
-    );
-
-    // Tool: searchReplace — edição textual por bloco exato com normalização
-    this.toolRegistry.register(
-      'searchReplace',
-      'Replace an exact block of text in any file. The search block is normalized (CRLF→LF, trailing whitespace removed) before matching, so small whitespace differences are tolerated. Indentation IS significant and must match exactly. Returns the full file path on success.',
-      {
-        filePath: { type: 'string', description: 'Absolute or relative path to the file' },
-        searchBlock: { type: 'string', description: 'Exact block of text to find (indentation sensitive)' },
-        replaceBlock: { type: 'string', description: 'New block of text to replace with' },
-      },
-      async (args) => {
-        const filePath = args.filePath as string;
-        const searchBlock = args.searchBlock as string;
-        const replaceBlock = args.replaceBlock as string;
-        const editor = new SearchReplaceEditor(reader);
-        const result = await editor.apply(filePath, searchBlock, replaceBlock);
-        if (!result.success) {
-          if (result.matchCount === 0) {
-            return 'BLOCK_NOT_FOUND: O bloco de busca não foi encontrado no arquivo. Verifique se o código está exatamente como está no arquivo.';
-          }
-          if (result.matchCount > 1) {
-            return `AMBIGUOUS_MATCH: O bloco de busca aparece ${result.matchCount} vezes no arquivo. Forneça um bloco mais específico.`;
-          }
-          throw new Error(
-            `searchReplace failed for "${filePath}": ${result.error}`
-          );
-        }
-        return `OK: File "${filePath}" has been updated.`;
-      }
-    );
-
-    // Tool: readFileForEdit — leitura com numeração de linhas
-    this.toolRegistry.register(
-      'readFileForEdit',
-      'Read a file with line numbers prepended to each line. Use this tool to see the exact content with line numbers, so you can identify blocks to use with the searchReplace tool.',
-      {
-        filePath: { type: 'string', description: 'Absolute or relative path to the file' },
-      },
-      async (args) => {
-        const filePath = args.filePath as string;
-        const content = await reader.readFile(filePath);
-        const lines = content.split('\n');
-
-        const MAX_LINES_DISPLAY = 1000;
-        const maxDisplayLines = Math.min(lines.length, MAX_LINES_DISPLAY);
-
-        const numbered = lines.slice(0, maxDisplayLines).map((line, i) => {
-          const lineNum = String(i + 1).padStart(4, ' ');
-          return `${lineNum} | ${line}`;
-        });
-
-        let result = numbered.join('\n');
-
-        if (lines.length > MAX_LINES_DISPLAY) {
-          const cutCount = lines.length - MAX_LINES_DISPLAY;
-          result +=
-            `\n\n⚠️ ATENÇÃO: O arquivo tem ${lines.length} linhas, ` +
-            `mas apenas as primeiras ${MAX_LINES_DISPLAY} foram exibidas ` +
-            `(${cutCount} linhas cortadas). ` +
-            `Se precisar de mais contexto, use readFile para ler o arquivo completo.`;
-        }
-
-        return result;
-      }
-    );
-  }
-}
 </file>
 
 <file path="src/core/FileReader.ts">
@@ -10584,6 +10212,177 @@ export class OllamaProvider implements IProvider, ICritiqueProvider {
 
   // post() e postStream() foram extraídos para OllamaHttpClient (SRP)
   // Veja src/providers/OllamaHttpClient.ts
+}
+</file>
+
+<file path="src/cli/strategies/ChatStrategy.ts">
+/**
+ * ChatStrategy — Interface Strategy para modos de chat no CLI.
+ *
+ * SRP: Cada estratégia encapsula um pipeline de chat diferente:
+ *   - StreamStrategy: streaming direto (sem ReAct)
+ *   - ReActStrategy: ReAct loop (com ou sem streaming pós-resposta)
+ *
+ * OCP: Novos modos de chat são adicionados criando novas classes
+ * que implementam ChatStrategy, sem modificar as existentes.
+ */
+
+import { AppContext, ReActLoop, RAGManager } from '../../core';
+import type { IProvider } from '../../providers/types';
+
+/** Contexto compartilhado entre todas as estratégias de chat */
+export interface ChatContext {
+  app: AppContext;
+  prompt: string;
+  streamMode: boolean;
+  noThink: boolean;
+  /** Se true, aplica Reflector (self-correction) pós-resposta */
+  reflectMode: boolean;
+}
+
+/** Interface base para todas as estratégias de chat */
+export interface ChatStrategy {
+  /** Executa o pipeline de chat e retorna a resposta final formatada */
+  execute(ctx: ChatContext): Promise<string>;
+}
+
+/**
+ * Constrói o system prompt completo (tool definitions + RAG + JSON rules).
+ *
+ * Extraída para função pura (SRP) — testável isoladamente.
+ *
+ * @param app     AppContext (provider, toolRegistry, commandExecutor, etc.)
+ * @param prompt  Prompt do usuário
+ * @param jsonMode Se true, adiciona regras de resposta em formato JSON
+ * @param ragDir  Diretório RAG opcional
+ * @param skipPromptSuffix Se true, não adiciona o sufixo "Pergunta do usuário" —
+ *                         útil quando o prompt já está no histórico da sessão
+ * @returns System prompt completo
+ */
+export async function buildSystemPrompt(
+  app: AppContext,
+  prompt: string,
+  jsonMode: boolean,
+  ragDir?: string,
+  skipPromptSuffix?: boolean
+): Promise<string> {
+  const { toolRegistry, fileReader, embedProvider } = app;
+
+  // ── RAG (Retrieval-Augmented Generation) ──
+  let ragContext = '';
+  if (ragDir) {
+    try {
+      const ragManager = RAGManager.create(fileReader, embedProvider);
+      console.error(`📚 Indexando ${ragDir}...`);
+      await ragManager.ensureIndex(ragDir);
+      console.error(`🔍 Buscando contexto relevante para: "${prompt}"`);
+      const matches = await ragManager.retrieve(prompt, ragDir);
+      ragContext = ragManager.formatContext(matches);
+      if (ragContext) {
+        console.error(
+          `✅ ${matches.length} trechos relevantes encontrados ` +
+          `(total: ~${ragContext.length} chars)`
+        );
+      } else {
+        console.error('ℹ️ Nenhum trecho relevante encontrado.');
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`⚠️ RAG error (injetando aviso no contexto): ${msg}`);
+      ragContext = '⚠️ [AVISO DO SISTEMA: Falha ao buscar contexto no RAG. Responda com base apenas no seu conhecimento prévio]';
+    }
+  }
+
+  // ── System Prompt ──
+  const toolDefinitions = toolRegistry.getDefinitions();
+  const toolNames = toolRegistry.getToolNames().join(', ');
+  const toolNameList = toolRegistry.getToolNames();
+
+  const systemPromptParts: string[] = [
+    'Você é um assistente com acesso a ferramentas para ler arquivos e executar comandos.',
+    `Seu diretório de trabalho atual é: ${process.cwd()}`,
+    'Use caminhos relativos a este diretório OU caminhos absolutos.',
+    '',
+    `Ferramentas disponíveis: ${toolNames}`,
+    '',
+    'Definições das ferramentas (JSON Schema):',
+    toolDefinitions,
+  ];
+
+  // ── WORKFLOW DE ENGENHARIA OBRIGATÓRIO (sempre presente) ──
+  systemPromptParts.push(
+    '',
+    'WORKFLOW DE ENGENHARIA OBRIGATÓRIO:',
+    'TU ÉS OBRIGATÓRIO A SEGUIR EXATAMENTE ESTES PASSOS ANTES DE GERAR A RESPOSTA FINAL:',
+    '',
+    'PASSO 1 (Contexto): Usa a tool readFile ou confia no contexto RAG para entender a estrutura atual antes de agir.',
+    '',
+    'PASSO 2 (Execução): Usa writeFile para novos ficheiros, ou editSymbol/searchReplace para alterar ficheiros existentes.',
+    '',
+    'PASSO 3 (Validação Autônoma): É OBRIGATÓRIO usar a tool execute para correr \'npm test\', \'tsc\' ou o comando adequado para testar o código acabado de alterar.',
+    '',
+    'PASSO 4 (Auto-Correção): Se o passo 3 falhar, lê a saída de erro do terminal e repete o PASSO 2 sozinho.',
+    '',
+    'PASSO 5 (Conclusão): Só gera a resposta final de texto para o utilizador quando o código estiver validado e a funcionar.',
+    '',
+    'NUNCA DÊ A RESPOSTA FINAL ANTES DE COMPLETAR TODOS OS PASSOS ACIMA.',
+    ''
+  );
+
+  // ── Bloco condicional de workflow de edição ──
+  const hasEditTools = toolNameList.includes('editSymbol') || toolNameList.includes('searchReplace');
+  if (hasEditTools) {
+    systemPromptParts.push(
+      '',
+      'WORKFLOW DE EDIÇÃO:',
+      '1. NUNCA reescreva um arquivo inteiro — edite apenas os trechos necessários.',
+      '2. Antes de editar, use readFileForEdit para ver o conteúdo atual numerado.',
+      '3. Para TypeScript (.ts): prefira editSymbol (substitui por nome do símbolo).',
+      '4. Para outros formatos: use searchReplace (cópia exata do código, com indentação).',
+      '5. Se searchReplace retornar BLOCK_NOT_FOUND, chame readFileForEdit novamente',
+      '   e tente com um bloco menor e mais específico.',
+      ''
+    );
+  }
+
+  // Injeta contexto RAG no system prompt, se houver
+  if (ragContext) {
+    systemPromptParts.push(
+      '',
+      '─'.repeat(60),
+      'DOCUMENTOS RELEVANTES PARA A PERGUNTA:',
+      '',
+      ragContext,
+      '',
+      '─'.repeat(60),
+      '',
+      'INSTRUÇÕES: Use os documentos acima como contexto para responder.',
+      'Se a resposta estiver nos documentos, cite a fonte ([arquivo:linha]).',
+      'Se não estiver nos documentos, use seu conhecimento geral.',
+      ''
+    );
+  }
+
+  // Se --json estiver ativo, usa formato tool_call / final_response
+  if (jsonMode) {
+    systemPromptParts.push(
+      '',
+      'REGRAS DE RESPOSTA (ESCRITAS EM JSON):',
+      '1. Se precisar usar uma ferramenta, responda APENAS com:',
+      '   {"tool_call": "<nome_da_ferramenta>", "args": {<parametros>}}',
+      '2. Se já tiver a resposta final, responda APENAS com:',
+      '   {"final_response": "<sua resposta completa>"}',
+      '3. NUNCA responda com texto fora do JSON.',
+      '4. NÃO invente informações — use as ferramentas para obter dados reais.',
+      '5. Responda estritamente em formato JSON válido.'
+    );
+  }
+
+  if (!skipPromptSuffix) {
+    systemPromptParts.push('', `Pergunta do usuário: ${prompt}`);
+  }
+
+  return systemPromptParts.join('\n');
 }
 </file>
 
@@ -12246,6 +12045,287 @@ export class ReActStrategy implements ChatStrategy {
       ? ` [Refletido: ${result.correctionStatus}]`
       : '';
     return `[${model}]${correctionBadge}\n${result.finalAnswer}`;
+  }
+}
+</file>
+
+<file path="src/core/AppContext.ts">
+/**
+ * AppContext: Container de injeção de dependência (DIP).
+ *
+ * Dependency Inversion Principle (DIP):
+ * - Módulos de ALTO nível (CLI, comandos) NÃO dependem de módulos de BAIXO nível
+ *   (OllamaProvider, FileReader concretos).
+ * - Ambos dependem de abstrações (IProvider, FileReader, CommandExecutor).
+ * - AppContext é o "ponto de cola" onde as implementações concretas são injetadas.
+ *
+ * Benefícios:
+ * 1. Testabilidade: nos testes unitários, podemos passar mocks/stubs
+ *    no lugar das implementações reais.
+ * 2. Flexibilidade: para trocar de provider (ex: Ollama → OpenRouter),
+ *    basta mudar a fábrica em um único lugar.
+ * 3. Configuração por flags CLI: os parâmetros (host, porta) são passados
+ *    pelo AppContext, não lidos diretamente dentro do comando.
+ */
+
+import type { IProvider, IEmbedProvider } from '../providers/types';
+import { FileReader } from './FileReader';
+import { CommandExecutor } from './CommandExecutor';
+import { ToolRegistry } from './ToolRegistry';
+import { ProviderFactory } from './ProviderFactory';
+import type { ProviderConfig } from './ProviderFactory';
+import { SessionManager } from './SessionManager';
+import { SessionStore } from './SessionStore';
+import type { ReActMessage } from './rag/ReActLoop';
+import { ASTEditor } from './ASTEditor';
+import { SearchReplaceEditor } from './SearchReplaceEditor';
+import * as fsp from 'node:fs/promises';
+import * as path from 'node:path';
+
+export interface AppContextConfig {
+  provider: ProviderConfig;
+  model?: string;
+  jsonMode?: boolean;
+  ragDir?: string;
+  sessionId?: string;
+  newSession?: boolean;
+}
+
+export class AppContext {
+  public readonly fileReader: FileReader;
+  public readonly commandExecutor: CommandExecutor;
+  public readonly provider: IProvider;
+  public readonly embedProvider: IEmbedProvider;
+  public readonly toolRegistry: ToolRegistry;
+  public readonly model: string;
+  public readonly jsonMode: boolean;
+  public readonly ragDir: string | undefined;
+  public readonly sessionManager: SessionManager;
+
+  constructor(config: AppContextConfig) {
+    // Utilitários base — sempre os mesmos
+    this.fileReader = new FileReader();
+    this.commandExecutor = new CommandExecutor();
+
+    // Provider via fábrica (OCP) — fácil de estender para novos providers
+    this.provider = ProviderFactory.createProvider(config.provider);
+    this.embedProvider = ProviderFactory.createEmbedProvider(config.provider);
+
+    // ToolRegistry — configurado com as tools padrão
+    this.toolRegistry = new ToolRegistry();
+    this.setupDefaultTools();
+
+    // Configurações de execução
+    this.model = config.model ?? 'llama3.2:1b';
+    this.jsonMode = config.jsonMode ?? false;
+    this.ragDir = config.ragDir;
+
+    // SessionManager — gerencia histórico da conversa multi-turn
+    const store = new SessionStore();
+    this.sessionManager = new SessionManager(store);
+
+    // NOTA: initSession NÃO é chamado aqui no construtor para evitar race condition.
+    // Chame app.initialize() após construir o AppContext para carregar/criar a sessão.
+  }
+
+  /**
+   * Inicializa a sessão de conversa (carrega existente ou cria nova).
+   *
+   * Deve ser chamado após a construção do AppContext, antes de usar o sessionManager.
+   * Separar do construtor evita race condition entre initSession() assíncrono
+   * e addMessage() síncrono.
+   *
+   * @param config Configuração original passada no construtor
+   */
+  async initialize(config?: AppContextConfig): Promise<void> {
+    const sessionId = config?.sessionId;
+    const newSession = config?.newSession;
+    if (!sessionId && !newSession) return; // Nada a inicializar
+    await this.initSession(sessionId, newSession);
+  }
+
+  private async initSession(sessionId?: string, newSession?: boolean): Promise<void> {
+    if (newSession) {
+      await this.sessionManager.newSession(this.model);
+    } else if (sessionId) {
+      const loaded = await this.sessionManager.loadSession(sessionId);
+      if (!loaded) {
+        console.warn(`[AppContext] Sessão "${sessionId}" não encontrada. Criando nova.`);
+        await this.sessionManager.newSession(this.model);
+      }
+    }
+  }
+
+  /**
+   * Helper para obter o histórico de mensagens da sessão ativa.
+   * Retorna array vazio se não houver sessão ativa.
+   */
+  getSessionHistory(): ReActMessage[] {
+    return this.sessionManager.getHistory();
+  }
+
+  /**
+   * Registra as tools padrão disponíveis para o ReAct loop.
+   * São injetadas via DI, mas configuradas com as dependências reais.
+   */
+  private setupDefaultTools(): void {
+    const reader = this.fileReader;
+    const executor = this.commandExecutor;
+
+    // Tool: readFile
+    this.toolRegistry.register(
+      'readFile',
+      'Read the complete contents of a file from disk',
+      {
+        filePath: { type: 'string', description: 'Absolute or relative path to the file' },
+      },
+      async (args) => reader.readFile(args.filePath as string)
+    );
+
+    // Tool: readDir
+    this.toolRegistry.register(
+      'readDir',
+      'List all files and directories inside a directory',
+      {
+        dirPath: { type: 'string', description: 'Absolute or relative path to the directory' },
+      },
+      async (args) => {
+        const entries = await reader.readDir(args.dirPath as string);
+        return entries.join('\n');
+      }
+    );
+
+    // Tool: execute
+    this.toolRegistry.register(
+      'execute',
+      'Executa comandos de terminal de forma segura (shell: false). OBRIGATÓRIO: Utilizar esta ferramenta para rodar \'npm test\', \'tsc\' ou scripts de build IMEDIATAMENTE APÓS usar writeFile ou ferramentas de edição. Se o comando falhar, lê a saída de erro e corrige o código na próxima iteração.',
+      {
+        command: { type: 'string', description: 'The executable name (e.g., ls, git, node)' },
+        args: { type: 'array', description: 'Argumentos do comando como um array estrito de strings. NUNCA passar uma única string concatenada.' },
+      },
+      async (toolArgs) => {
+        const cmd = toolArgs.command as string;
+        const rawArgs = toolArgs.args;
+        const cmdArgs: string[] = Array.isArray(rawArgs)
+          ? rawArgs.map(String)
+          : typeof rawArgs === 'string'
+            ? rawArgs.split(' ')
+            : [];
+        const result = await executor.execute(cmd, cmdArgs);
+        return result.stdout || result.stderr || '(no output)';
+      }
+    );
+
+    // Tool: editSymbol — edição estrutural de símbolos TypeScript via AST
+    this.toolRegistry.register(
+      'editSymbol',
+      'Edição estrutural cirúrgica APENAS para ficheiros TypeScript (.ts). Substitui um nó AST inteiro (função, classe, interface) pelo seu nome exato.',
+      {
+        filePath: { type: 'string', description: 'Absolute or relative path to the .ts file' },
+        symbolName: { type: 'string', description: 'Name of the top-level symbol to replace' },
+        newCode: { type: 'string', description: 'Complete new source code for the symbol' },
+      },
+      async (args) => {
+        try {
+          const filePath = args.filePath as string;
+          const symbolName = args.symbolName as string;
+          const newCode = args.newCode as string;
+          const safePath = await FileReader.resolveSecurePath(filePath);
+          const astEditor = new ASTEditor(reader);
+          const result = await astEditor.replaceSymbol(safePath, symbolName, newCode);
+          if (!result.success) {
+            return 'Erro na edição AST: Símbolo não encontrado ou ficheiro inválido. Para edições menores, tenta usar a tool searchReplace.';
+          }
+          return `OK: Symbol "${symbolName}" in "${filePath}" has been replaced successfully.`;
+        } catch {
+          return 'Erro na edição AST: Símbolo não encontrado ou ficheiro inválido. Para edições menores, tenta usar a tool searchReplace.';
+        }
+      }
+    );
+
+    // Tool: searchReplace — edição textual por bloco exato
+    this.toolRegistry.register(
+      'searchReplace',
+      'Substituição de blocos exatos de texto em qualquer ficheiro. A string de busca (search) tem de ser 100% idêntica ao código atual (incluindo espaços). Usar para ficheiros não-TS ou pequenas edições.',
+      {
+        filePath: { type: 'string', description: 'Absolute or relative path to the file' },
+        searchBlock: { type: 'string', description: 'Exact block of text to find (indentation sensitive)' },
+        replaceBlock: { type: 'string', description: 'New block of text to replace with' },
+      },
+      async (args) => {
+        try {
+          const filePath = args.filePath as string;
+          const searchBlock = args.searchBlock as string;
+          const replaceBlock = args.replaceBlock as string;
+          const safePath = await FileReader.resolveSecurePath(filePath);
+          const editor = new SearchReplaceEditor(reader);
+          const result = await editor.apply(safePath, searchBlock, replaceBlock);
+          if (!result.success) {
+            return 'Erro no searchReplace: O bloco de busca não foi encontrado com 100% de exatidão. Verifica os espaços em branco e tenta novamente.';
+          }
+          return `OK: File "${filePath}" has been updated.`;
+        } catch {
+          return 'Erro no searchReplace: O bloco de busca não foi encontrado com 100% de exatidão. Verifica os espaços em branco e tenta novamente.';
+        }
+      }
+    );
+
+    // Tool: writeFile — criação/atualização de ficheiros
+    this.toolRegistry.register(
+      'writeFile',
+      'Create or overwrite a file with the given content. Creates parent directories automatically. Returns a success message with the file path.',
+      {
+        filePath: { type: 'string', description: 'Relative or absolute path to the file to create/overwrite' },
+        content: { type: 'string', description: 'Complete text/code content to write into the file' },
+      },
+      async (args) => {
+        const filePath = args.filePath as string;
+        const content = args.content as string;
+        try {
+          const safePath = await FileReader.resolveSecurePath(filePath);
+          await fsp.mkdir(path.dirname(safePath), { recursive: true });
+          await fsp.writeFile(safePath, content, 'utf-8');
+          return `Ficheiro "${filePath}" criado/atualizado com sucesso.`;
+        } catch (err: any) {
+          return `Erro ao escrever ficheiro "${filePath}": ${err.message}`;
+        }
+      }
+    );
+
+    // Tool: readFileForEdit — leitura com numeração de linhas
+    this.toolRegistry.register(
+      'readFileForEdit',
+      'Read a file with line numbers prepended to each line. Use this tool to see the exact content with line numbers, so you can identify blocks to use with the searchReplace tool.',
+      {
+        filePath: { type: 'string', description: 'Absolute or relative path to the file' },
+      },
+      async (args) => {
+        const filePath = args.filePath as string;
+        const content = await reader.readFile(filePath);
+        const lines = content.split('\n');
+
+        const MAX_LINES_DISPLAY = 1000;
+        const maxDisplayLines = Math.min(lines.length, MAX_LINES_DISPLAY);
+
+        const numbered = lines.slice(0, maxDisplayLines).map((line, i) => {
+          const lineNum = String(i + 1).padStart(4, ' ');
+          return `${lineNum} | ${line}`;
+        });
+
+        let result = numbered.join('\n');
+
+        if (lines.length > MAX_LINES_DISPLAY) {
+          const cutCount = lines.length - MAX_LINES_DISPLAY;
+          result +=
+            `\n\n⚠️ ATENÇÃO: O arquivo tem ${lines.length} linhas, ` +
+            `mas apenas as primeiras ${MAX_LINES_DISPLAY} foram exibidas ` +
+            `(${cutCount} linhas cortadas). ` +
+            `Se precisar de mais contexto, use readFile para ler o arquivo completo.`;
+        }
+
+        return result;
+      }
+    );
   }
 }
 </file>
