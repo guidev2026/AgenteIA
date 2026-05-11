@@ -1,5 +1,9 @@
-import { contextBridge } from 'electron';
+import { contextBridge, ipcRenderer } from 'electron';
 
-contextBridge.exposeInMainWorld('electronAPI', {
-  platform: process.platform,
-});
+const api = {
+  askSoberano: (prompt: string): Promise<string> => {
+    return ipcRenderer.invoke('ask-soberano', prompt);
+  },
+};
+
+contextBridge.exposeInMainWorld('api', api);

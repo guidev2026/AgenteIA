@@ -4,8 +4,7 @@
   "private": true,
   "description": "Soberano-Core Monorepo — Agente IA modular com Core, CLI e Shell Desktop",
   "workspaces": [
-    "packages/core",
-    "packages/shell"
+    "packages/*"
   ],
   "scripts": {
     "build": "npm run build -w packages/core",
