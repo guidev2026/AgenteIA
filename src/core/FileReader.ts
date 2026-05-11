@@ -29,24 +29,29 @@ export class FileReader {
   /**
    * Resolve um caminho de usuário e valida que ele está dentro do diretório do projeto.
    *
-   * Segurança contra Path Traversal (SEC-01, SEC-02):
-   * 1. Resolve o caminho absoluto via path.resolve() a partir de process.cwd()
-   * 2. Verifica se o caminho resolvido começa com o diretório raiz do projeto
-   * 3. Se estiver fora (ex: ../../.ssh/id_rsa), lança erro
+   * Segurança contra Path Traversal (SEC-01, SEC-02) e Symlink Attacks (C-1):
+   * 1. Resolve o caminho absoluto via path.resolve()
+   * 2. Resolve symlinks via fs.promises.realpath() para evitar que atalhos maliciosos
+   *    desviem do diretório do projeto (C-1)
+   * 3. Também resolve symlinks do rootDir (caso o projeto em si seja um link)
+   * 4. Verifica se o caminho real começa com o diretório raiz real do projeto
+   * 5. Se estiver fora (ex: ../../.ssh/id_rsa via symlink), lança erro
    *
    * @param userPath Caminho fornecido pelo usuário/agente (absoluto ou relativo)
-   * @returns Caminho absoluto seguro dentro do projeto
+   * @returns Caminho absoluto seguro dentro do projeto (com symlinks resolvidos)
    * @throws Error se o caminho resolvido estiver fora do diretório do projeto
    */
-  static resolveSecurePath(userPath: string): string {
+  static async resolveSecurePath(userPath: string): Promise<string> {
     const rootDir = process.cwd();
     const resolved = path.resolve(userPath);
-    if (!resolved.startsWith(rootDir)) {
+    const realResolved = await fsp.realpath(resolved);
+    const realRoot = await fsp.realpath(rootDir);
+    if (!realResolved.startsWith(realRoot)) {
       throw new Error(
-        `Acesso negado: O caminho "${resolved}" está fora do diretório do projeto "${rootDir}".`
+        `Acesso negado: O caminho "${resolved}" (real: "${realResolved}") está fora do diretório do projeto "${rootDir}" (real: "${realRoot}").`
       );
     }
-    return resolved;
+    return realResolved;
   }
 
   /**
@@ -62,7 +67,7 @@ export class FileReader {
    * @returns Conteúdo textual do arquivo
    */
   async readFile(filePath: string): Promise<string> {
-    const safePath = FileReader.resolveSecurePath(filePath);
+    const safePath = await FileReader.resolveSecurePath(filePath);
     try {
       return await fsp.readFile(safePath, 'utf-8');
     } catch (err: any) {
@@ -82,7 +87,7 @@ export class FileReader {
    * @returns Array com os nomes dos arquivos/diretórios dentro de dirPath
    */
   async readDir(dirPath: string): Promise<string[]> {
-    const safePath = FileReader.resolveSecurePath(dirPath);
+    const safePath = await FileReader.resolveSecurePath(dirPath);
     try {
       return await fsp.readdir(safePath);
     } catch (err: any) {

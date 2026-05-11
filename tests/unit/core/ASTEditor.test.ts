@@ -20,8 +20,10 @@ import { FileReader as FileReaderImpl } from '../../../src/core/FileReader';
 vi.mock('node:fs/promises', () => ({
   default: {
     writeFile: vi.fn(),
+    realpath: vi.fn((p: string) => Promise.resolve(p)),
   },
   writeFile: vi.fn(),
+  realpath: vi.fn((p: string) => Promise.resolve(p)),
 }));
 
 import * as fs from 'node:fs/promises';
@@ -61,8 +63,9 @@ describe('ASTEditor', () => {
 
       expect(result.success).toBe(true);
       expect(result.symbolFound).toBe(true);
+      const expectedSafePath = await FileReaderImpl.resolveSecurePath(TEST_PATH);
       expect(fs.writeFile).toHaveBeenCalledWith(
-        FileReaderImpl.resolveSecurePath(TEST_PATH),
+        expectedSafePath,
         expectedOutput,
         'utf-8'
       );
@@ -81,8 +84,9 @@ describe('ASTEditor', () => {
 
       expect(result.success).toBe(true);
       expect(result.symbolFound).toBe(true);
+      const expectedSafePath = await FileReaderImpl.resolveSecurePath(TEST_PATH);
       expect(fs.writeFile).toHaveBeenCalledWith(
-        FileReaderImpl.resolveSecurePath(TEST_PATH),
+        expectedSafePath,
         expected,
         'utf-8'
       );
@@ -100,8 +104,9 @@ describe('ASTEditor', () => {
 
       expect(result.success).toBe(true);
       expect(result.symbolFound).toBe(true);
+      const expectedSafePath = await FileReaderImpl.resolveSecurePath(TEST_PATH);
       expect(fs.writeFile).toHaveBeenCalledWith(
-        FileReaderImpl.resolveSecurePath(TEST_PATH),
+        expectedSafePath,
         expected,
         'utf-8'
       );
@@ -119,8 +124,9 @@ describe('ASTEditor', () => {
 
       expect(result.success).toBe(true);
       expect(result.symbolFound).toBe(true);
+      const expectedSafePath = await FileReaderImpl.resolveSecurePath(TEST_PATH);
       expect(fs.writeFile).toHaveBeenCalledWith(
-        FileReaderImpl.resolveSecurePath(TEST_PATH),
+        expectedSafePath,
         expected,
         'utf-8'
       );
@@ -138,8 +144,9 @@ describe('ASTEditor', () => {
 
       expect(result.success).toBe(true);
       expect(result.symbolFound).toBe(true);
+      const expectedSafePath = await FileReaderImpl.resolveSecurePath(TEST_PATH);
       expect(fs.writeFile).toHaveBeenCalledWith(
-        FileReaderImpl.resolveSecurePath(TEST_PATH),
+        expectedSafePath,
         expected,
         'utf-8'
       );
@@ -157,8 +164,9 @@ describe('ASTEditor', () => {
       const result = await editor.replaceSymbol(TEST_PATH, 'target', newFn);
 
       expect(result.success).toBe(true);
+      const expectedSafePath = await FileReaderImpl.resolveSecurePath(TEST_PATH);
       expect(fs.writeFile).toHaveBeenCalledWith(
-        FileReaderImpl.resolveSecurePath(TEST_PATH),
+        expectedSafePath,
         expected,
         'utf-8'
       );
@@ -231,8 +239,9 @@ describe('ASTEditor', () => {
 
       expect(result.success).toBe(true);
       expect(result.symbolFound).toBe(true);
+      const expectedSafePath = await FileReaderImpl.resolveSecurePath(TEST_PATH);
       expect(fs.writeFile).toHaveBeenCalledWith(
-        FileReaderImpl.resolveSecurePath(TEST_PATH),
+        expectedSafePath,
         expected,
         'utf-8'
       );

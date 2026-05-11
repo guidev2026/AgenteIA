@@ -136,30 +136,31 @@ export class SessionStore implements ISessionStore {
       return [];
     }
 
-    const summaries: SessionSummary[] = [];
+    // Filtra apenas arquivos .json e paraleliza a leitura
+    const jsonFiles = files.filter((f) => extname(f) === '.json');
 
-    for (const file of files) {
-      // Ignora arquivos que não são .json
-      if (extname(file) !== '.json') continue;
-
-      const sessionId = file.replace(/\.json$/, '');
-      const filePath = join(this.baseDir, file);
-
-      try {
+    const results = await Promise.allSettled(
+      jsonFiles.map(async (file) => {
+        const sessionId = file.replace(/\.json$/, '');
+        const filePath = join(this.baseDir, file);
         const data = await readFile(filePath, 'utf-8');
         const parsed = JSON.parse(data) as Session;
-
-        summaries.push({
+        return {
           id: sessionId,
           createdAt: parsed.createdAt,
           updatedAt: parsed.updatedAt,
           messageCount: parsed.messages.length,
           title: parsed.metadata?.title,
-        });
-      } catch {
-        // Pula arquivos corrompidos (não quebra o loop)
-        continue;
+        } as SessionSummary;
+      })
+    );
+
+    const summaries: SessionSummary[] = [];
+    for (const result of results) {
+      if (result.status === 'fulfilled') {
+        summaries.push(result.value);
       }
+      // Arquivos corrompidos ou ausentes são ignorados
     }
 
     // Ordena por updatedAt decrescente (mais recentes primeiro)

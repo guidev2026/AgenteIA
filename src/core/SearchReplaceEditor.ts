@@ -157,7 +157,7 @@ export class SearchReplaceEditor {
 
     // 7. Validar caminho (Path Traversal) e escrever o arquivo
     try {
-      const safePath = FileReader.resolveSecurePath(filePath);
+      const safePath = await FileReader.resolveSecurePath(filePath);
       await fsp.writeFile(safePath, newContent, 'utf-8');
     } catch (err: any) {
       return {

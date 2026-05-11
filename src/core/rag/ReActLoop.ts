@@ -18,8 +18,6 @@ import type { CommandExecutor } from '../CommandExecutor';
 import type { ToolRegistry } from '../ToolRegistry';
 import type { Reflector, ReflectionResult, ReflectionError } from '../Reflector';
 import { JsonValidator } from '../../validation/JsonValidator';
-import { PromptBuilder } from './PromptBuilder';
-import type { PromptConfig } from './PromptBuilder';
 import { assessCompressionNeed, CompressionTrigger } from '../IContextCompressor';
 import type { IContextCompressor } from '../IContextCompressor';
 import { TokenEstimator } from '../TokenEstimator';
@@ -62,7 +60,6 @@ export class ReActLoop {
   private reflector?: Reflector;
   private compressor?: IContextCompressor;
   private jsonValidator: JsonValidator;
-  private promptBuilder: PromptBuilder;
 
   constructor(
     provider: IProvider,
@@ -77,7 +74,6 @@ export class ReActLoop {
     this.reflector = reflector;
     this.compressor = compressor;
     this.jsonValidator = new JsonValidator();
-    this.promptBuilder = new PromptBuilder();
   }
 
   /**
@@ -405,18 +401,18 @@ export class ReActLoop {
             content: compressed.workingMemory,
           };
           currentHistory = [workingMemoryMsg, ...compressed.keptMessages];
+          wasCompressed = true;
+          compressionRatio = compressed.compressionRatio;
+          console.error(
+            `[ReActLoop] Context compressed at ${need} trigger. ` +
+            `Ratio: ${(compressed.compressionRatio * 100).toFixed(1)}%`,
+          );
         } else {
-          console.warn(
-            'Aviso: Falha ao comprimir contexto. O histórico mais antigo foi truncado para economizar memória.'
+          console.error(
+            'Erro: Falha ao comprimir contexto. O histórico mais antigo foi truncado para economizar memória.'
           );
           currentHistory = compressed.keptMessages;
         }
-        wasCompressed = true;
-        compressionRatio = compressed.compressionRatio;
-        console.error(
-          `[ReActLoop] Context compressed at ${need} trigger. ` +
-          `Ratio: ${(compressed.compressionRatio * 100).toFixed(1)}%`,
-        );
       }
     }
 

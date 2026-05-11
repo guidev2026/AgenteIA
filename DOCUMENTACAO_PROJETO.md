@@ -59,8 +59,7 @@ AgenteIA/
 │   │       ├── Embedder.ts     # Geração de embeddings (SRP)
 │   │       ├── VectorStore.ts  # Cache de embeddings em disco (SRP)
 │   │       ├── Retriever.ts    # Busca por similaridade (SRP)
-│   │       ├── RAGManager.ts   # Orquestrador do pipeline RAG
-│   │       ├── PromptBuilder.ts# Montagem de prompt com contexto (SRP)
+│   │       ├── RAGManager.ts   # Orquestrador do pipeline RAG (DI via construtor)
 │   │       ├── ReActLoop.ts    # Loop Reasoning + Acting (Strategy)
 │   │       └── graph/
 │   │           ├── index.ts               # Re-exports do módulo GraphRAG
@@ -89,7 +88,12 @@ AgenteIA/
 
 Abstração sobre o sistema de arquivos do Node.js (`fs/promises`). Toda operação é assíncrona (Promise-based).
 
-**Métodos:**
+**Métodos estáticos:**
+| Método | Descrição |
+|--------|-----------|
+| `resolveSecurePath(userPath)` | **(async)** Resolve caminho e valida contra Path Traversal + Symlink Attacks (C-1). Usa `fs.realpath()` no caminho do usuário e no rootDir para prevenir ataques via symlinks maliciosos |
+
+**Métodos de instância:**
 | Método | Descrição |
 |--------|-----------|
 | `readFile(filePath)` | Lê conteúdo completo de um arquivo (UTF-8) |
@@ -98,6 +102,8 @@ Abstração sobre o sistema de arquivos do Node.js (`fs/promises`). Toda operaç
 
 **Tipos exportados:**
 - `SearchResult`: `{ file: string; line: number; content: string }`
+
+> **Nota:** `resolveSecurePath` foi tornado **assíncrono** (retorna `Promise<string>`) para suportar `fs.promises.realpath()` — mitigação contra Symlink Attacks (C-1). Todos os métodos de instância e consumidores (`ASTEditor`, `SearchReplaceEditor`) usam `await`.
 
 ---
 
@@ -117,13 +123,15 @@ Camada segura sobre `child_process.spawn` do Node.js.
 
 ### RAGManager (`RAGManager.ts`)
 
-Gerencia o pipeline de Retrieval-Augmented Generation: chunking de arquivos, geração de embeddings, busca por similaridade de cosseno e cache em disco. Zero dependências externas (usa apenas `node:fs/promises`, `node:path`, `node:crypto`).
+Gerencia o pipeline de Retrieval-Augmented Generation: chunking de arquivos, geração de embeddings, busca por similaridade de cosseno, cache em disco e GraphRAG. Zero dependências externas (usa apenas `node:fs/promises`, `node:path`, `node:crypto`).
+
+**Injeção de Dependências (DIP):** O `RAGManager` recebe todas as suas dependências via construtor (`IChunker`, `Embedder`, `Retriever`, `VectorStore`, `GraphBuilder`, `IGraphStore`, `IRelationshipExtractor`, `IGraphQuery`). Nenhuma instância é criada internamente — facilitando testes e substituição de implementações.
 
 **Métodos:**
 | Método | Descrição |
 |--------|-----------|
-| `ensureIndex(dir)` | Indexa diretório (chunks → embeddings → cache). Só reindexa se houver mudanças |
-| `retrieve(query, dir)` | Busca semântica: top 5 chunks por cosine similarity |
+| `ensureIndex(dir)` | Indexa diretório (chunks → embeddings → cache + GraphBuilder). Só reindexa se houver mudanças |
+| `retrieve(query, dir)` | Busca semântica + GraphRAG enhancement: top 5 chunks por cosine similarity, expandidos com adjacências do grafo |
 | `formatContext(matches)` | Formata chunks como `[arquivo:linha]` para injeção no prompt |
 | `connectProvider(provider)` | Conecta ao OllamaProvider para gerar embeddings via all-minilm |
 
@@ -649,16 +657,27 @@ A feature foi implementada com duas classes de responsabilidade única:
 └───────────────────────────────────────────────────────────────┘
 ```
 
-### Interface SessionStore
+### Interface SessionStore (`ISessionStore` — DIP)
+
+A `SessionStore` agora implementa a interface `ISessionStore`, seguindo o **Dependency Inversion Principle**. O `SessionManager` depende da abstração (`ISessionStore`), não da implementação concreta.
 
 ```typescript
+interface ISessionStore {
+  save(session: Session): Promise<void>;
+  load(sessionId: string): Promise<Session | null>;
+  list(): Promise<SessionSummary[]>;
+  delete(sessionId: string): Promise<void>;
+}
+
 interface Session {
   id: string;                    // UUID v4
-  model: string;                 // Modelo utilizado (ex: "llama3.2:1b")
   createdAt: string;             // ISO 8601
   updatedAt: string;             // ISO 8601
-  title: string | null;          // Título extraído da 1ª mensagem do usuário
-  messages: ChatMessage[];       // Array de mensagens
+  messages: ReActMessage[];      // Array de mensagens (tipo ReActMessage do ReActLoop)
+  metadata?: {                   // Metadados opcionais agrupados
+    model?: string;              // Modelo utilizado (ex: "llama3.2:1b")
+    title?: string;              // Título auto-extraído da 1ª mensagem (máx 80 chars)
+  };
 }
 
 interface SessionSummary {
@@ -666,14 +685,11 @@ interface SessionSummary {
   createdAt: string;
   updatedAt: string;
   messageCount: number;
-  title: string | null;
-}
-
-interface ChatMessage {
-  role: 'user' | 'assistant' | 'system';
-  content: string;
+  title?: string;
 }
 ```
+
+> **Mudanças:** `messages` agora usa `ReActMessage[]` (tipo compartilhado com `ReActLoop`), `model` e `title` foram movidos para `metadata` aninhado, `title` pode ser `undefined` em vez de `null`, e a listagem usa `Promise.allSettled` para paralelismo com tolerância a falhas.
 
 ### Fluxo de uso (exemplo real)
 
@@ -866,7 +882,7 @@ A suíte de testes usa **Vitest** (v4.1.5) e está organizada em `tests/unit/`, 
 | **Core** | `tests/unit/core/ErrorJournal.test.ts` | 8 | Criação, persistência, ordenação, filtro por tipo, limite FIFO, stats, arquivo corrompido, versão inválida |
 | **Providers** | `tests/unit/providers/OllamaProvider.test.ts` | 12 | Chat com parâmetros, format=json, erro HTTP, embed. **Streaming:** tokens individuais, body com stream:true, erro HTTP no stream, linhas vazias/não-JSON, chunks TCP quebrados |
 | **RAG** | `tests/unit/rag/Retriever.test.ts` | 13 | Cosine similarity, rankeamento, ordenação, busca vazia |
-| **RAG** | `tests/unit/rag/ReActLoop.test.ts` | 26 | **Text Mode:** ACTION/FINAL_ANSWER, limite 5 iterações, erro em ACTION, build de prompt, modelo padrão. **JSON Mode:** final_response direta, tool_call → ferramenta → final_response, detecção de loop repetido, fallback text mode, resposta não-JSON, formato desconhecido, erro em ferramenta, esgotamento de iterações. **Reflector:** text/json mode com reflect, correção, reflect=false, reflector não injetado, resposta vazia. **Streaming:** jsonMode + stream, textMode + stream, sem streamChat (fallback), stream desativado, múltiplas iterações com stream |
+| **RAG** | `tests/unit/rag/ReActLoop.test.ts` | 26 | Text Mode, JSON Mode, Reflector, Streaming. Loop com mensagens tipadas via ReActMessage |
 | **RAG** | `tests/unit/rag/Chunker.test.ts` | 8 | Chunking por parágrafo, sentença, overlap, limite de chunks |
 | **RAG** | `tests/unit/rag/TypescriptASTAdapter.test.ts` | 19 | Roteamento de extensões (.ts, .js, .tsx, .jsx, .mjs, .cjs), fallback para não-código, parse de classes/funções/imports/exports, ASTNode structure, empty file handling |
 | **Graph** | `tests/unit/graph/JsonGraphStore.test.ts` | 20 | CRUD do grafo, persistência JSON, operações de escrita (IGraphStore) |
@@ -923,7 +939,11 @@ npx vitest            # Modo watch (recarrega automático)
 - Arquitetura modular e extensível (interface `IProvider` permite novos providers)
 - Zero dependências externas em produção (apenas `node:http`, `node:fs/promises`, `node:child_process`)
 - TypeScript configurado com strict mode
-- ✅ **SOLID implementado** — SRP (classes coesas), OCP (ProviderFactory), LSP (IProvider), ISP (interfaces enxutas), DIP (AppContext + injeção de dependências)
+- ✅ **SOLID implementado** — SRP (classes coesas), OCP (ProviderFactory), LSP (IProvider), ISP (interfaces enxutas), DIP (AppContext + injeção de dependências + ISessionStore + RAGManager DI)
+- ✅ **FileReader.resolveSecurePath()** tornado assíncrono com `fs.realpath()` — mitigação contra Symlink Attacks (C-1)
+- ✅ **SessionStore** refatorada com interface `ISessionStore` (DIP) e `ReActMessage` tipada do `ReActLoop`
+- ✅ **RAGManager** refatorado com injeção de dependências via construtor (DIP) — removeu `PromptBuilder.ts` (arquivo deletado, duplicado)
+- ✅ **ASTEditor e SearchReplaceEditor** corrigidos para usar `await` em `resolveSecurePath()`
 - ✅ **308 testes unitários** passando com Vitest (25 arquivos de teste: ToolRegistry, CommandExecutor, Reflector, ErrorJournal, SessionStore, SessionManager, OllamaProvider, Retriever, ReActLoop, Chunker, TypescriptASTAdapter, ASTChunkerService, JsonValidator, commands, JsonGraphStore, ASTRelationshipExtractor, GraphBuilder, GraphRAGManager, ChatStrategy, ASTEditor, SearchReplaceEditor, TokenEstimator, StatefulCompressor, IContextCompressor, GraphRAGManager)
 
 📝 **Possíveis próximos passos (não implementados):**

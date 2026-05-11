@@ -20,8 +20,10 @@ import type { FileReader } from '../../../src/core/FileReader';
 vi.mock('node:fs/promises', () => ({
   default: {
     writeFile: vi.fn(),
+    realpath: vi.fn((p: string) => Promise.resolve(p)),
   },
   writeFile: vi.fn(),
+  realpath: vi.fn((p: string) => Promise.resolve(p)),
 }));
 
 import * as fs from 'node:fs/promises';

@@ -143,47 +143,50 @@ export class GraphBuilder {
       }
     }
 
-    // Processa arquivos modificados
-    for (const file of filesToProcess) {
-      try {
+    // Processa arquivos modificados — paralelizado
+    const extractionResults = await Promise.allSettled(
+      filesToProcess.map(async (file) => {
         const content = await this.fileReader.readFile(file.fullPath);
         const result = this.relationshipExtractor.extract(file.relPath, content);
+        return { file, result };
+      })
+    );
 
-        // Remove nós/arestas antigos deste arquivo (se estava no grafo anterior)
-        const previousNodes = existingGraph
-          ? existingGraph.nodes.filter((n) => n.filePath === file.relPath)
-          : [];
-        for (const prevNode of previousNodes) {
-          allNodes.delete(prevNode.id);
-        }
-        // Remove arestas conectadas a nós antigos
-        const previousNodeIds = new Set(previousNodes.map((n) => n.id));
-        for (const [key, edge] of edgeMap) {
-          if (previousNodeIds.has(edge.from) || previousNodeIds.has(edge.to)) {
-            allEdges.delete(key);
-            edgeMap.delete(key);
-          }
-        }
+    for (const settled of extractionResults) {
+      if (settled.status === 'rejected') continue;
+      const { file, result } = settled.value;
 
-        // Adiciona novos nós/arestas
-        for (const node of result.nodes) {
-          allNodes.set(node.id, node);
-        }
-        for (const edge of result.edges) {
-          const key = edgeKey(edge);
-          if (!allEdges.has(key)) {
-            allEdges.add(key);
-            edgeMap.set(key, edge);
-          }
-        }
-
-        newFileMtimes[file.relPath] = file.mtime;
-        processedCount++;
-        rebuilt = true;
-      } catch {
-        // Arquivo com erro de leitura — ignora
-        continue;
+      // Remove nós/arestas antigos deste arquivo (se estava no grafo anterior)
+      const previousNodes = existingGraph
+        ? existingGraph.nodes.filter((n) => n.filePath === file.relPath)
+        : [];
+      for (const prevNode of previousNodes) {
+        allNodes.delete(prevNode.id);
       }
+      // Remove arestas conectadas a nós antigos
+      const previousNodeIds = new Set(previousNodes.map((n) => n.id));
+      for (const [key, edge] of edgeMap) {
+        if (previousNodeIds.has(edge.from) || previousNodeIds.has(edge.to)) {
+          allEdges.delete(key);
+          edgeMap.delete(key);
+        }
+      }
+
+      // Adiciona novos nós/arestas
+      for (const node of result.nodes) {
+        allNodes.set(node.id, node);
+      }
+      for (const edge of result.edges) {
+        const key = edgeKey(edge);
+        if (!allEdges.has(key)) {
+          allEdges.add(key);
+          edgeMap.set(key, edge);
+        }
+      }
+
+      newFileMtimes[file.relPath] = file.mtime;
+      processedCount++;
+      rebuilt = true;
     }
 
     // 5. Monta grafo final
@@ -225,15 +228,23 @@ export class GraphBuilder {
       } catch {
         return;
       }
-      for (const entry of entries) {
+
+      // Paraleliza fs.stat em todas as entradas do diretório
+      const entriesWithStats = await Promise.all(
+        entries.map(async (entry): Promise<{ entry: string; fullPath: string; stat: import('node:fs').Stats | null }> => {
+          const fullPath = path.join(dir, entry);
+          try {
+            const stat = await fs.stat(fullPath);
+            return { entry, fullPath, stat };
+          } catch {
+            return { entry, fullPath, stat: null };
+          }
+        })
+      );
+
+      for (const { entry, fullPath, stat } of entriesWithStats) {
         if (all.length >= maxFiles) break;
-        const fullPath = path.join(dir, entry);
-        let stat;
-        try {
-          stat = await fs.stat(fullPath);
-        } catch {
-          continue;
-        }
+        if (!stat) continue;
 
         if (stat.isDirectory()) {
           const base = path.basename(entry);

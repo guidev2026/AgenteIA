@@ -131,10 +131,18 @@ export class RAGManager {
       } catch {
         return;
       }
-      for (const entry of entries) {
+
+      // Paraleliza fs.stat em todas as entradas do diretório
+      const entriesWithStats = await Promise.all(
+        entries.map(async (entry): Promise<{ entry: string; fullPath: string; stat: import('node:fs').Stats | null }> => {
+          const fullPath = path.join(dir, entry);
+          const stat = await fs.stat(fullPath).catch(() => null);
+          return { entry, fullPath, stat };
+        })
+      );
+
+      for (const { entry, fullPath, stat } of entriesWithStats) {
         if (all.length >= maxFiles) break;
-        const fullPath = path.join(dir, entry);
-        const stat = await fs.stat(fullPath).catch(() => null);
         if (!stat) continue;
 
         if (stat.isDirectory()) {
@@ -183,16 +191,18 @@ export class RAGManager {
       }
     }
 
-    // 3. Verifica quais precisam ser (re)indexados
+    // 3. Verifica quais precisam ser (re)indexados — paralelizado
+    const statsResults = await Promise.allSettled(
+      filesToIndex.map(async (filePath) => {
+        const stat = await fs.stat(filePath);
+        const relPath = path.relative(absoluteRoot, filePath);
+        return { filePath, stat, relPath };
+      })
+    );
     const filesToProcess: string[] = [];
-    for (const filePath of filesToIndex) {
-      let stat;
-      try {
-        stat = await fs.stat(filePath);
-      } catch {
-        continue;
-      }
-      const relPath = path.relative(absoluteRoot, filePath);
+    for (const result of statsResults) {
+      if (result.status === 'rejected') continue;
+      const { filePath, stat, relPath } = result.value;
       const cachedMeta = existingIndex?.files?.[relPath];
       if (cachedMeta && cachedMeta.mtime === stat.mtimeMs) continue;
       filesToProcess.push(filePath);
@@ -201,43 +211,48 @@ export class RAGManager {
     // Se não há nada para processar, usa índice existente
     if (filesToProcess.length === 0 && existingIndex) return;
 
-    // 4. Indexa arquivos novos/modificados
-    const newChunks: ChunkEntry[] = [];
-
-    for (const filePath of filesToProcess) {
-      let content: string;
-      try {
-        content = await this.fileReader.readFile(filePath);
-      } catch {
-        continue;
-      }
-      if (!this.isTextContent(content)) continue;
-
-      const chunks = this.chunker.chunk(content);
-      if (chunks.length === 0) continue;
-
-      const relPath = path.relative(absoluteRoot, filePath);
-
-      for (let ci = 0; ci < chunks.length; ci++) {
-        const chunk = chunks[ci];
-        const chunkId = `${relPath}#${ci}`;
-        let embedding: number[];
-        try {
-          embedding = await this.embedder.embed(chunk.text);
-        } catch {
-          continue;
+    // 4. Indexa arquivos novos/modificados — paralelizado com allSettled
+    const indexResults = await Promise.allSettled(
+      filesToProcess.map(async (filePath) => {
+        const content = await this.fileReader.readFile(filePath);
+        if (!this.isTextContent(content)) {
+          return { filePath, chunks: [] as ChunkEntry[] };
         }
 
-        newChunks.push({
-          id: chunkId,
-          text: chunk.text,
-          filePath: relPath,
-          startLine: chunk.startLine,
-          endLine: chunk.endLine,
-          embedding,
-          indexedAt: now,
-        });
+        const rawChunks = this.chunker.chunk(content);
+        if (rawChunks.length === 0) {
+          return { filePath, chunks: [] as ChunkEntry[] };
+        }
+
+        const relPath = path.relative(absoluteRoot, filePath);
+
+        // Gera embeddings em paralelo para cada chunk deste arquivo
+        const chunkEntries = await Promise.all(
+          rawChunks.map(async (chunk, ci) => {
+            const chunkId = `${relPath}#${ci}`;
+            const embedding = await this.embedder.embed(chunk.text);
+            return {
+              id: chunkId,
+              text: chunk.text,
+              filePath: relPath,
+              startLine: chunk.startLine,
+              endLine: chunk.endLine,
+              embedding,
+              indexedAt: now,
+            } as ChunkEntry;
+          })
+        );
+
+        return { filePath, chunks: chunkEntries };
+      })
+    );
+
+    const newChunks: ChunkEntry[] = [];
+    for (const result of indexResults) {
+      if (result.status === 'fulfilled') {
+        newChunks.push(...result.value.chunks);
       }
+      // resultados rejected (erro de leitura/embed) são ignorados
     }
 
     // 5. Descarrega modelo de embedding
@@ -247,33 +262,38 @@ export class RAGManager {
     let finalChunks: ChunkEntry[];
     let finalFiles: Record<string, { mtime: number; chunks: number }>;
 
+    // Paraleliza fs.stat para todos os arquivos processados
+    const mtimeResults = await Promise.allSettled(
+      filesToProcess.map(async (filePath) => {
+        const relPath = path.relative(absoluteRoot, filePath);
+        const relevantChunks = newChunks.filter((c) => c.filePath === relPath);
+        const stat = await fs.stat(filePath).catch(() => null);
+        return {
+          relPath,
+          mtime: stat ? stat.mtimeMs : now,
+          chunks: relevantChunks.length,
+        };
+      })
+    );
+
+    const processedFiles: Record<string, { mtime: number; chunks: number }> = {};
+    for (const result of mtimeResults) {
+      if (result.status === 'fulfilled') {
+        processedFiles[result.value.relPath] = {
+          mtime: result.value.mtime,
+          chunks: result.value.chunks,
+        };
+      }
+    }
+
     if (existingIndex) {
       const reindexedPaths = new Set(filesToProcess.map((f) => path.relative(absoluteRoot, f)));
       finalChunks = existingIndex.chunks.filter((c) => !reindexedPaths.has(c.filePath));
       finalChunks.push(...newChunks);
-      finalFiles = { ...existingIndex.files };
-
-      for (const filePath of filesToProcess) {
-        const relPath = path.relative(absoluteRoot, filePath);
-        const relevantChunks = newChunks.filter((c) => c.filePath === relPath);
-        const stat = await fs.stat(filePath).catch(() => null);
-        finalFiles[relPath] = {
-          mtime: stat ? stat.mtimeMs : now,
-          chunks: relevantChunks.length,
-        };
-      }
+      finalFiles = { ...existingIndex.files, ...processedFiles };
     } else {
       finalChunks = newChunks;
-      finalFiles = {};
-      for (const filePath of filesToProcess) {
-        const relPath = path.relative(absoluteRoot, filePath);
-        const relevantChunks = newChunks.filter((c) => c.filePath === relPath);
-        const stat = await fs.stat(filePath).catch(() => null);
-        finalFiles[relPath] = {
-          mtime: stat ? stat.mtimeMs : now,
-          chunks: relevantChunks.length,
-        };
-      }
+      finalFiles = processedFiles;
     }
 
     // 7. Salva índice

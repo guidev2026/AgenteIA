@@ -294,6 +294,12 @@ export class ASTRelationshipExtractor implements IRelationshipExtractor {
 
     // REFERENCES: referências a símbolos sem chamada explícita
     if (edgeCount < MAX_EDGES_PER_FILE) {
+      // Pré-compila todas as regexes de nome para evitar new RegExp() no loop duplo
+      const nameRegexCache = new Map<string, RegExp>();
+      for (const name of allNodeIdsByName.keys()) {
+        nameRegexCache.set(name, new RegExp(`\\b${name}\\b`, 'g'));
+      }
+
       for (const astNode of astNodes) {
         const sourceId = hashId(`${filePath}#${astNode.kind}#${astNode.name}`);
 
@@ -304,7 +310,7 @@ export class ASTRelationshipExtractor implements IRelationshipExtractor {
           if (targetId === sourceId) continue;
 
           // Verificar se o nome aparece no texto do nó (excluindo chamadas já detectadas)
-          const nameRegex = new RegExp(`\\b${name}\\b`, 'g');
+          const nameRegex = nameRegexCache.get(name)!;
           const matches = astNode.text.matchAll(nameRegex);
           const positions: number[] = [];
 

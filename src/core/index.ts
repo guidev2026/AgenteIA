@@ -44,9 +44,6 @@ export type { SearchMatch } from './rag/Retriever';
 // ReAct Loop + Prompt Builder (Strategy pattern)
 export { ReActLoop } from './rag/ReActLoop';
 export type { ReActMessage, ReActResult } from './rag/ReActLoop';
-export { PromptBuilder } from './rag/PromptBuilder';
-export type { PromptConfig } from './rag/PromptBuilder';
-
 // Reflector (self-correction)
 export { Reflector } from './Reflector';
 export type { ReflectionError, ReflectionResult } from './Reflector';
