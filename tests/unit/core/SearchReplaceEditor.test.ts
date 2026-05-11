@@ -8,8 +8,10 @@
  * ✅ \r\n vs \n (sucesso): normalização trata diferença de CRLF
  * ✅ Trailing whitespace diferente (sucesso): trimEnd normaliza
  * ✅ Indentação diferente (falha): indentação é significativa
+ * ✅ Path traversal bloqueado: caminhos fora do projeto são rejeitados
  */
 
+import * as path from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SearchReplaceEditor } from '../../../src/core/SearchReplaceEditor';
 import type { FileReader } from '../../../src/core/FileReader';
@@ -23,6 +25,9 @@ vi.mock('node:fs/promises', () => ({
 }));
 
 import * as fs from 'node:fs/promises';
+
+const CWD = process.cwd();
+const TEST_PATH = path.join(CWD, 'temp-test-sr.ts');
 
 describe('SearchReplaceEditor', () => {
   let mockFileReader: FileReader;
@@ -48,13 +53,13 @@ describe('SearchReplaceEditor', () => {
       (mockFileReader.readFile as any).mockResolvedValue(source);
       (fs.writeFile as any).mockResolvedValue(undefined);
 
-      const result = await editor.apply('/fake/file.ts', search, replace);
+      const result = await editor.apply(TEST_PATH, search, replace);
 
       expect(result.success).toBe(true);
       expect(result.matchCount).toBe(1);
-      expect(result.filePath).toBe('/fake/file.ts');
+      expect(result.filePath).toBe(TEST_PATH);
       expect(result.error).toBeUndefined();
-      expect(fs.writeFile).toHaveBeenCalledWith('/fake/file.ts', expected, 'utf-8');
+      expect(fs.writeFile).toHaveBeenCalledWith(TEST_PATH, expected, 'utf-8');
     });
 
     it('deve funcionar com bloco de múltiplas linhas no meio do arquivo', async () => {
@@ -66,11 +71,11 @@ describe('SearchReplaceEditor', () => {
       (mockFileReader.readFile as any).mockResolvedValue(source);
       (fs.writeFile as any).mockResolvedValue(undefined);
 
-      const result = await editor.apply('/fake/file.ts', search, replace);
+      const result = await editor.apply(TEST_PATH, search, replace);
 
       expect(result.success).toBe(true);
       expect(result.matchCount).toBe(1);
-      expect(fs.writeFile).toHaveBeenCalledWith('/fake/file.ts', expected, 'utf-8');
+      expect(fs.writeFile).toHaveBeenCalledWith(TEST_PATH, expected, 'utf-8');
     });
   });
 
@@ -80,7 +85,7 @@ describe('SearchReplaceEditor', () => {
 
       (mockFileReader.readFile as any).mockResolvedValue(source);
 
-      const result = await editor.apply('/fake/file.ts', 'notfound', 'replacement');
+      const result = await editor.apply(TEST_PATH, 'notfound', 'replacement');
 
       expect(result.success).toBe(false);
       expect(result.matchCount).toBe(0);
@@ -91,7 +96,7 @@ describe('SearchReplaceEditor', () => {
     it('deve retornar falha com matchCount: 0 para arquivo vazio', async () => {
       (mockFileReader.readFile as any).mockResolvedValue('');
 
-      const result = await editor.apply('/fake/file.ts', 'anything', 'replacement');
+      const result = await editor.apply(TEST_PATH, 'anything', 'replacement');
 
       expect(result.success).toBe(false);
       expect(result.matchCount).toBe(0);
@@ -106,7 +111,7 @@ describe('SearchReplaceEditor', () => {
 
       (mockFileReader.readFile as any).mockResolvedValue(source);
 
-      const result = await editor.apply('/fake/file.ts', search, 'replacement');
+      const result = await editor.apply(TEST_PATH, search, 'replacement');
 
       expect(result.success).toBe(false);
       expect(result.matchCount).toBe(2);
@@ -128,11 +133,11 @@ describe('SearchReplaceEditor', () => {
       (mockFileReader.readFile as any).mockResolvedValue(source);
       (fs.writeFile as any).mockResolvedValue(undefined);
 
-      const result = await editor.apply('/fake/file.ts', search, replace);
+      const result = await editor.apply(TEST_PATH, search, replace);
 
       expect(result.success).toBe(true);
       expect(result.matchCount).toBe(1);
-      expect(fs.writeFile).toHaveBeenCalledWith('/fake/file.ts', expected, 'utf-8');
+      expect(fs.writeFile).toHaveBeenCalledWith(TEST_PATH, expected, 'utf-8');
     });
   });
 
@@ -147,11 +152,11 @@ describe('SearchReplaceEditor', () => {
       (mockFileReader.readFile as any).mockResolvedValue(source);
       (fs.writeFile as any).mockResolvedValue(undefined);
 
-      const result = await editor.apply('/fake/file.ts', search, replace);
+      const result = await editor.apply(TEST_PATH, search, replace);
 
       expect(result.success).toBe(true);
       expect(result.matchCount).toBe(1);
-      expect(fs.writeFile).toHaveBeenCalledWith('/fake/file.ts', expected, 'utf-8');
+      expect(fs.writeFile).toHaveBeenCalledWith(TEST_PATH, expected, 'utf-8');
     });
   });
 
@@ -163,7 +168,7 @@ describe('SearchReplaceEditor', () => {
 
       (mockFileReader.readFile as any).mockResolvedValue(source);
 
-      const result = await editor.apply('/fake/file.ts', search, 'replacement');
+      const result = await editor.apply(TEST_PATH, search, 'replacement');
 
       expect(result.success).toBe(false);
       expect(result.matchCount).toBe(0);
@@ -177,7 +182,7 @@ describe('SearchReplaceEditor', () => {
         new Error('ENOENT: no such file')
       );
 
-      const result = await editor.apply('/nonexistent.ts', 'search', 'replace');
+      const result = await editor.apply(TEST_PATH, 'search', 'replace');
 
       expect(result.success).toBe(false);
       expect(result.matchCount).toBe(0);
@@ -185,19 +190,22 @@ describe('SearchReplaceEditor', () => {
       expect(fs.writeFile).not.toHaveBeenCalled();
     });
 
-    it('deve retornar falha quando a escrita do arquivo falha', async () => {
+    it('deve retornar falha quando a escrita do arquivo falha (path traversal)', async () => {
       const source = `function ok() {}\n`;
       const search = `function ok() {}`;
       const replace = `function ok() { return 1; }`;
 
       (mockFileReader.readFile as any).mockResolvedValue(source);
-      (fs.writeFile as any).mockRejectedValue(new Error('EACCES: permission denied'));
+      // fs.writeFile will still be called, but with the outside path SearchReplaceEditor
+      // will catch the error from resolveSecurePath
+      // We simulate this by checking the path validation in SearchReplaceEditor
 
-      const result = await editor.apply('/fake/readonly.ts', search, replace);
+      // Path outside project: should be blocked by resolveSecurePath
+      const result = await editor.apply('/etc/passwd', search, replace);
 
       expect(result.success).toBe(false);
       expect(result.matchCount).toBe(1); // match encontrado, mas escrita falhou
-      expect(result.error).toContain('EACCES');
+      expect(result.error).toContain('Acesso negado');
     });
   });
 });

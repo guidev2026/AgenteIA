@@ -13,7 +13,7 @@
  */
 
 import * as fsp from 'node:fs/promises';
-import type { FileReader } from './FileReader';
+import { FileReader } from './FileReader';
 
 /**
  * Resultado da operação de busca e substituição.
@@ -155,9 +155,10 @@ export class SearchReplaceEditor {
     const replaceLines = replaceBlock.split('\n');
     const newContent = [...beforeLines, ...replaceLines, ...afterLines].join('\n');
 
-    // 7. Escrever o arquivo
+    // 7. Validar caminho (Path Traversal) e escrever o arquivo
     try {
-      await fsp.writeFile(filePath, newContent, 'utf-8');
+      const safePath = FileReader.resolveSecurePath(filePath);
+      await fsp.writeFile(safePath, newContent, 'utf-8');
     } catch (err: any) {
       return {
         success: false,

@@ -19,6 +19,7 @@ import type { IASTParser } from '../IASTParser';
 import type { IRelationshipExtractor, ExtractionResult } from './IRelationshipExtractor';
 import type { GraphNode, GraphEdge } from './types';
 import { hashId } from './JsonGraphStore';
+import type { IChunker } from '../IChunker';
 
 // Built-ins do Node.js/JS que não devem gerar arestas
 const BUILTINS = new Set([
@@ -38,9 +39,11 @@ const MAX_EDGES_PER_FILE = 200;
 
 export class ASTRelationshipExtractor implements IRelationshipExtractor {
   private readonly astParser: IASTParser;
+  private readonly chunkIdMapper?: IChunker;
 
-  constructor(astParser: IASTParser) {
+  constructor(astParser: IASTParser, chunkIdMapper?: IChunker) {
     this.astParser = astParser;
+    this.chunkIdMapper = chunkIdMapper;
   }
 
   extract(filePath: string, source: string): ExtractionResult {
@@ -79,14 +82,33 @@ export class ASTRelationshipExtractor implements IRelationshipExtractor {
     // 2. Nós dos símbolos (funções, classes, métodos, interfaces)
     const symbolNodes: Map<string, GraphNode> = new Map();
 
-    for (const astNode of astNodes) {
+    // Pré-calcula chunkIds se chunkIdMapper estiver disponível
+    let chunkIdByLine: Map<number, string> | undefined;
+    if (this.chunkIdMapper) {
+      chunkIdByLine = this.buildChunkIdMap(source, filePath);
+    }
+
+    for (let i = 0; i < astNodes.length; i++) {
+      const astNode = astNodes[i];
       const nodeType = this.mapKindToType(astNode.kind);
       const id = hashId(`${filePath}#${astNode.kind}#${astNode.name}`);
+
+      // Determina chunkId: se temos o mapeamento, usa a startLine do símbolo
+      let chunkId: string | undefined;
+      if (chunkIdByLine) {
+        // Procura o chunk que contém a startLine do símbolo
+        chunkId = this.findChunkIdForLine(chunkIdByLine, astNode.startLine);
+      }
+      // Fallback: usa o índice do nó como parte do chunkId (formato: path#indice)
+      if (!chunkId) {
+        chunkId = `${filePath}#${i}`;
+      }
 
       const graphNode: GraphNode = {
         id,
         label: astNode.name,
         type: nodeType,
+        chunkId,
         filePath,
         startLine: astNode.startLine,
         endLine: astNode.endLine,
@@ -344,5 +366,43 @@ export class ASTRelationshipExtractor implements IRelationshipExtractor {
       default:
         return 'function';
     }
+  }
+
+  /**
+   * Constrói um mapa de linha inicial → chunkId usando o chunkIdMapper (IChunker).
+   * Útil para que os GraphNode tenham chunkId preenchido, populando nodesByChunkId.
+   */
+  private buildChunkIdMap(source: string, filePath: string): Map<number, string> {
+    const map = new Map<number, string>();
+    if (!this.chunkIdMapper) return map;
+
+    const chunks = this.chunkIdMapper.chunk(source, filePath);
+    for (let ci = 0; ci < chunks.length; ci++) {
+      const chunk = chunks[ci];
+      const chunkId = `${filePath}#${ci}`;
+      // Mapeia cada linha do chunk para o chunkId
+      for (let line = chunk.startLine; line <= chunk.endLine; line++) {
+        map.set(line, chunkId);
+      }
+    }
+    return map;
+  }
+
+  /**
+   * Encontra o chunkId que contém uma determinada linha.
+   * Busca exata primeiro, depois a linha mais próxima anterior.
+   */
+  private findChunkIdForLine(chunkIdByLine: Map<number, string>, line: number): string | undefined {
+    const exact = chunkIdByLine.get(line);
+    if (exact) return exact;
+
+    // Fallback: encontra a linha anterior mais próxima que tem chunkId
+    let candidate: number | undefined;
+    for (const [l, id] of chunkIdByLine) {
+      if (l < line && (candidate === undefined || l > candidate)) {
+        candidate = l;
+      }
+    }
+    return candidate !== undefined ? chunkIdByLine.get(candidate) : undefined;
   }
 }

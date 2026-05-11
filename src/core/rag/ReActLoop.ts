@@ -211,6 +211,30 @@ export class ReActLoop {
           toolResult = err instanceof Error ? err.message : String(err);
         }
 
+        // ── Prevenção de Context Overflow ──
+        const contextLimit = TokenEstimator.getLimit(model);
+        const resultSnippet = `\n\nResultado da ferramenta ${toolName}: ${toolResult}`;
+        const estimatedNewTotal =
+          TokenEstimator.estimate(accumulatedPrompt) +
+          TokenEstimator.estimate(resultSnippet);
+        const overflowThreshold = Math.floor(contextLimit * 0.8);
+
+        if (estimatedNewTotal > overflowThreshold) {
+          // Trunca o toolResult para caber no limite seguro
+          const maxToolTokens = Math.max(
+            50,
+            overflowThreshold - TokenEstimator.estimate(accumulatedPrompt) - 100
+          );
+          const truncated = toolResult.slice(0, maxToolTokens * 4); // 4 chars ≈ 1 token
+          const originalTokens = TokenEstimator.estimate(toolResult);
+          toolResult =
+            truncated +
+            `\n\n⚠️ [CONTEXT OVERFLOW PREVENTION] O resultado original desta ferramenta ` +
+            `tinha ~${originalTokens} tokens e foi truncado para caber no limite de contexto ` +
+            `(~${contextLimit} tokens). Considere usar apenas as informações mais relevantes ` +
+            `deste resultado.`;
+        }
+
         accumulatedPrompt += `\n\nResultado da ferramenta ${toolName}: ${toolResult}`;
         continue;
       }
@@ -373,11 +397,17 @@ export class ReActLoop {
 
       if (need !== CompressionTrigger.NONE) {
         const compressed = await this.compressor.compress(history, resolvedModel, systemPrompt);
-        const workingMemoryMsg: ReActMessage = {
-          role: 'system',
-          content: compressed.workingMemory,
-        };
-        currentHistory = [workingMemoryMsg, ...compressed.keptMessages];
+        // Só adiciona workingMemory ao histórico se tiver conteúdo real
+        // Isso evita mensagens [SYSTEM]: vazias no SessionStore (sessões fantasmas)
+        if (compressed.workingMemory && compressed.workingMemory.trim().length > 0) {
+          const workingMemoryMsg: ReActMessage = {
+            role: 'system',
+            content: compressed.workingMemory,
+          };
+          currentHistory = [workingMemoryMsg, ...compressed.keptMessages];
+        } else {
+          currentHistory = compressed.keptMessages;
+        }
         wasCompressed = true;
         compressionRatio = compressed.compressionRatio;
         console.error(

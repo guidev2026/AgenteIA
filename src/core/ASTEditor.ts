@@ -15,7 +15,7 @@
 
 import * as ts from 'typescript';
 import * as fs from 'node:fs/promises';
-import type { FileReader } from './FileReader';
+import { FileReader } from './FileReader';
 import { findTopLevelSymbol } from './astUtils';
 
 /**
@@ -109,9 +109,10 @@ export class ASTEditor {
       newCode +
       source.slice(end);
 
-    // 5. Escrever o arquivo modificado
+    // 5. Validar caminho (Path Traversal) e escrever o arquivo modificado
     try {
-      await fs.writeFile(filePath, newContent, 'utf-8');
+      const safePath = FileReader.resolveSecurePath(filePath);
+      await fs.writeFile(safePath, newContent, 'utf-8');
     } catch (err: any) {
       return {
         ...baseResult,

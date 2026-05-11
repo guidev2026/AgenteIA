@@ -26,10 +26,13 @@ import type { ChunkEntry } from './VectorStore';
 import type { IEmbedProvider } from '../../providers/types';
 import { GraphBuilder } from './graph/GraphBuilder';
 import type { IGraphStore } from './graph/IGraphStore';
+import type { IGraphQuery } from './graph/IGraphQuery';
 import type { IRelationshipExtractor } from './graph/IRelationshipExtractor';
 import { ASTRelationshipExtractor } from './graph/ASTRelationshipExtractor';
 import { JsonGraphStore } from './graph/JsonGraphStore';
 import { TypescriptASTAdapter } from './TypescriptASTAdapter';
+import { ASTChunkerService } from './ASTChunkerService';
+import { GraphRAGManager } from './graph/GraphRAGManager';
 
 // Extensões de arquivos texto para indexar
 const TEXT_EXTENSIONS = new Set([
@@ -45,6 +48,7 @@ export class RAGManager {
   private readonly vectorStore: VectorStore;
   private readonly retriever: Retriever;
   private readonly graphBuilder: GraphBuilder | null;
+  private readonly graphRAGManager: GraphRAGManager | null;
 
   constructor(
     fileReader: FileReader,
@@ -52,7 +56,8 @@ export class RAGManager {
     embedder: Embedder,
     vectorStore: VectorStore,
     retriever: Retriever,
-    graphBuilder?: GraphBuilder | null
+    graphBuilder?: GraphBuilder | null,
+    graphRAGManager?: GraphRAGManager | null
   ) {
     this.fileReader = fileReader;
     this.chunker = chunker;
@@ -60,6 +65,7 @@ export class RAGManager {
     this.vectorStore = vectorStore;
     this.retriever = retriever;
     this.graphBuilder = graphBuilder ?? null;
+    this.graphRAGManager = graphRAGManager ?? null;
   }
 
   /**
@@ -77,18 +83,24 @@ export class RAGManager {
     chunker?: IChunker,
     graphStorePath?: string
   ): RAGManager {
-    const effectiveChunker = chunker ?? new Chunker();
+    // Default: ASTChunkerService com fallback textual
+    const astParser = new TypescriptASTAdapter();
+    const fallbackChunker = new Chunker();
+    const effectiveChunker = chunker ?? new ASTChunkerService(astParser, fallbackChunker);
+
     const embedder = new Embedder(embedProvider);
     const vectorStore = new VectorStore();
     const retriever = new Retriever();
     let graphBuilder: GraphBuilder | undefined;
+    let graphRAGManager: GraphRAGManager | undefined;
+
     if (graphStorePath) {
-      const graphStore: IGraphStore = new JsonGraphStore(graphStorePath);
-      const astParser = new TypescriptASTAdapter();
-      const extractor: IRelationshipExtractor = new ASTRelationshipExtractor(astParser);
+      const graphStore: IGraphStore & IGraphQuery = new JsonGraphStore(graphStorePath);
+      const extractor: IRelationshipExtractor = new ASTRelationshipExtractor(astParser, effectiveChunker);
       graphBuilder = new GraphBuilder(fileReader, extractor, graphStore);
+      graphRAGManager = new GraphRAGManager(retriever, graphStore);
     }
-    return new RAGManager(fileReader, effectiveChunker, embedder, vectorStore, retriever, graphBuilder);
+    return new RAGManager(fileReader, effectiveChunker, embedder, vectorStore, retriever, graphBuilder, graphRAGManager);
   }
 
   /**
@@ -282,19 +294,30 @@ export class RAGManager {
 
   /**
    * Busca os chunks mais similares à consulta.
+   * Se o GraphRAGManager estiver disponível, enriquece os resultados
+   * com expansão de vizinhança no grafo de conhecimento.
    */
   async retrieve(query: string, rootDir: string): Promise<SearchMatch[]> {
     const absoluteRoot = path.resolve(rootDir);
-
-    // Gera embedding da consulta
     const queryEmbedding = await this.embedder.embed(query, 'all-minilm', '0s');
 
     // Carrega índice
     const store = await this.vectorStore.load(absoluteRoot);
     if (!store || store.chunks.length === 0) return [];
 
-    // Busca e retorna
-    return this.retriever.retrieve(queryEmbedding, store.chunks);
+    // Busca vetorial base
+    if (!this.graphRAGManager) {
+      return this.retriever.retrieve(queryEmbedding, store.chunks);
+    }
+
+    // Busca híbrida: vetorial + grafo de conhecimento
+    const graphResult = await this.graphRAGManager.search(
+      queryEmbedding,
+      store.chunks,
+      { topK: 5, graphDepth: 2 }
+    );
+
+    return graphResult.matches;
   }
 
   /**

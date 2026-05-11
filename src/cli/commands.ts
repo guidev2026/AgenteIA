@@ -69,19 +69,20 @@ function buildConfig(parsed: CliArgs): import('../core').AppContextConfig {
   };
 }
 
-// Cache do contexto — construído uma vez por execução CLI
-let ctx: AppContext | null = null;
-
 /**
- * Obtém (ou cria) o AppContext e garante que a sessão foi inicializada.
- * Agora assíncrono porque app.initialize() pode carregar sessão do disco.
+ * Cria um novo AppContext a partir dos argumentos parseados.
+ *
+ * Cada chamada de comando recebe um AppContext limpo (sem cache de execuções
+ * anteriores). Isso garante que flags como --json, --stream, --model sejam
+ * respeitadas independentemente da ordem de execução.
+ *
+ * @param parsed Argumentos parseados da linha de comando
+ * @returns AppContext configurado e inicializado
  */
-async function getContext(parsed: CliArgs): Promise<AppContext> {
-  if (!ctx) {
-    const config = buildConfig(parsed);
-    ctx = new AppContext(config);
-    await ctx.initialize(config);
-  }
+async function createContext(parsed: CliArgs): Promise<AppContext> {
+  const config = buildConfig(parsed);
+  const ctx = new AppContext(config);
+  await ctx.initialize(config);
   return ctx;
 }
 
@@ -104,7 +105,7 @@ async function getContext(parsed: CliArgs): Promise<AppContext> {
  * @returns String formatada para exibição no terminal
  */
 export async function runCommand(parsed: CliArgs): Promise<string> {
-  const app = await getContext(parsed);
+  const app = await createContext(parsed);
 
   switch (parsed.command) {
     /**
@@ -214,7 +215,10 @@ export async function runCommand(parsed: CliArgs): Promise<string> {
       });
 
       // Adiciona a resposta do assistente ao histórico e persiste
-      await app.sessionManager.addMessage({ role: 'assistant', content: result }, app.model);
+      // Apenas salva se houver conteúdo real (evita sessões fantasmas)
+      if (result && result.trim().length > 0) {
+        await app.sessionManager.addMessage({ role: 'assistant', content: result }, app.model);
+      }
       await app.sessionManager.flush();
 
       return result;

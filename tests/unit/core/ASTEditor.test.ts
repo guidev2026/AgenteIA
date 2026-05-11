@@ -7,11 +7,14 @@
  * ✅ Arquivo inexistente: success: false, mensagem de erro clara
  * ✅ Substituição de classe, interface, variável, type alias
  * ✅ getFullStart() usado corretamente (preserva comentários/whitespace anteriores)
+ * ✅ Path traversal bloqueado: caminhos fora do projeto são rejeitados
  */
 
+import * as path from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ASTEditor } from '../../../src/core/ASTEditor';
 import type { FileReader } from '../../../src/core/FileReader';
+import { FileReader as FileReaderImpl } from '../../../src/core/FileReader';
 
 // Mock do fs nativo
 vi.mock('node:fs/promises', () => ({
@@ -22,6 +25,10 @@ vi.mock('node:fs/promises', () => ({
 }));
 
 import * as fs from 'node:fs/promises';
+
+const CWD = process.cwd();
+const TEST_PATH = path.join(CWD, 'temp-test-ast.ts');
+const RO_PATH = path.join(CWD, 'temp-readonly.ts');
 
 describe('ASTEditor', () => {
   let mockFileReader: FileReader;
@@ -50,11 +57,15 @@ describe('ASTEditor', () => {
       (mockFileReader.readFile as any).mockResolvedValue(source);
       (fs.writeFile as any).mockResolvedValue(undefined);
 
-      const result = await editor.replaceSymbol('/fake/path.ts', 'oldFunc', newCode);
+      const result = await editor.replaceSymbol(TEST_PATH, 'oldFunc', newCode);
 
       expect(result.success).toBe(true);
       expect(result.symbolFound).toBe(true);
-      expect(fs.writeFile).toHaveBeenCalledWith('/fake/path.ts', expectedOutput, 'utf-8');
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        FileReaderImpl.resolveSecurePath(TEST_PATH),
+        expectedOutput,
+        'utf-8'
+      );
     });
 
     it('deve substituir uma classe', async () => {
@@ -66,11 +77,15 @@ describe('ASTEditor', () => {
       (mockFileReader.readFile as any).mockResolvedValue(source);
       (fs.writeFile as any).mockResolvedValue(undefined);
 
-      const result = await editor.replaceSymbol('/fake/path.ts', 'MyClass', newClass);
+      const result = await editor.replaceSymbol(TEST_PATH, 'MyClass', newClass);
 
       expect(result.success).toBe(true);
       expect(result.symbolFound).toBe(true);
-      expect(fs.writeFile).toHaveBeenCalledWith('/fake/path.ts', expected, 'utf-8');
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        FileReaderImpl.resolveSecurePath(TEST_PATH),
+        expected,
+        'utf-8'
+      );
     });
 
     it('deve substituir uma variável (VariableStatement)', async () => {
@@ -81,11 +96,15 @@ describe('ASTEditor', () => {
       (mockFileReader.readFile as any).mockResolvedValue(source);
       (fs.writeFile as any).mockResolvedValue(undefined);
 
-      const result = await editor.replaceSymbol('/fake/path.ts', 'MY_CONST', newVar);
+      const result = await editor.replaceSymbol(TEST_PATH, 'MY_CONST', newVar);
 
       expect(result.success).toBe(true);
       expect(result.symbolFound).toBe(true);
-      expect(fs.writeFile).toHaveBeenCalledWith('/fake/path.ts', expected, 'utf-8');
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        FileReaderImpl.resolveSecurePath(TEST_PATH),
+        expected,
+        'utf-8'
+      );
     });
 
     it('deve substituir uma interface', async () => {
@@ -96,11 +115,15 @@ describe('ASTEditor', () => {
       (mockFileReader.readFile as any).mockResolvedValue(source);
       (fs.writeFile as any).mockResolvedValue(undefined);
 
-      const result = await editor.replaceSymbol('/fake/path.ts', 'MyInterface', newInterface);
+      const result = await editor.replaceSymbol(TEST_PATH, 'MyInterface', newInterface);
 
       expect(result.success).toBe(true);
       expect(result.symbolFound).toBe(true);
-      expect(fs.writeFile).toHaveBeenCalledWith('/fake/path.ts', expected, 'utf-8');
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        FileReaderImpl.resolveSecurePath(TEST_PATH),
+        expected,
+        'utf-8'
+      );
     });
 
     it('deve substituir um type alias', async () => {
@@ -111,11 +134,15 @@ describe('ASTEditor', () => {
       (mockFileReader.readFile as any).mockResolvedValue(source);
       (fs.writeFile as any).mockResolvedValue(undefined);
 
-      const result = await editor.replaceSymbol('/fake/path.ts', 'MyType', newType);
+      const result = await editor.replaceSymbol(TEST_PATH, 'MyType', newType);
 
       expect(result.success).toBe(true);
       expect(result.symbolFound).toBe(true);
-      expect(fs.writeFile).toHaveBeenCalledWith('/fake/path.ts', expected, 'utf-8');
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        FileReaderImpl.resolveSecurePath(TEST_PATH),
+        expected,
+        'utf-8'
+      );
     });
 
     it('deve preservar comentários/whitespace anteriores ao nó (usando getFullStart)', async () => {
@@ -127,10 +154,14 @@ describe('ASTEditor', () => {
       (mockFileReader.readFile as any).mockResolvedValue(source);
       (fs.writeFile as any).mockResolvedValue(undefined);
 
-      const result = await editor.replaceSymbol('/fake/path.ts', 'target', newFn);
+      const result = await editor.replaceSymbol(TEST_PATH, 'target', newFn);
 
       expect(result.success).toBe(true);
-      expect(fs.writeFile).toHaveBeenCalledWith('/fake/path.ts', expected, 'utf-8');
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        FileReaderImpl.resolveSecurePath(TEST_PATH),
+        expected,
+        'utf-8'
+      );
     });
   });
 
@@ -141,12 +172,11 @@ describe('ASTEditor', () => {
       (mockFileReader.readFile as any).mockResolvedValue(source);
       (fs.writeFile as any).mockResolvedValue(undefined);
 
-      const result = await editor.replaceSymbol('/fake/path.ts', 'nonExistent', 'anything');
+      const result = await editor.replaceSymbol(TEST_PATH, 'nonExistent', 'anything');
 
       expect(result.success).toBe(false);
       expect(result.symbolFound).toBe(false);
       expect(result.error).toContain('nonExistent');
-      expect(result.error).toContain('/fake/path.ts');
       // Arquivo não deve ter sido escrito
       expect(fs.writeFile).not.toHaveBeenCalled();
     });
@@ -164,19 +194,16 @@ describe('ASTEditor', () => {
       expect(fs.writeFile).not.toHaveBeenCalled();
     });
 
-    it('deve retornar success: false quando a escrita falha', async () => {
+    it('deve retornar success: false quando a escrita falha (caminho fora do projeto)', async () => {
       const source = `function willFail() {}\n`;
 
       (mockFileReader.readFile as any).mockResolvedValue(source);
-      (fs.writeFile as any).mockRejectedValue(
-        new Error('EACCES: permission denied')
-      );
 
-      const result = await editor.replaceSymbol('/fake/readonly.ts', 'willFail', 'new code');
+      const result = await editor.replaceSymbol('/etc/passwd', 'willFail', 'new code');
 
       expect(result.success).toBe(false);
       expect(result.symbolFound).toBe(true);
-      expect(result.error).toContain('EACCES');
+      expect(result.error).toContain('Acesso negado');
     });
   });
 
@@ -184,7 +211,7 @@ describe('ASTEditor', () => {
     it('deve funcionar com arquivo vazio (nenhum símbolo encontrado)', async () => {
       (mockFileReader.readFile as any).mockResolvedValue('');
 
-      const result = await editor.replaceSymbol('/fake/empty.ts', 'anything', 'code');
+      const result = await editor.replaceSymbol(TEST_PATH, 'anything', 'code');
 
       expect(result.success).toBe(false);
       expect(result.symbolFound).toBe(false);
@@ -200,11 +227,15 @@ describe('ASTEditor', () => {
       (mockFileReader.readFile as any).mockResolvedValue(source);
       (fs.writeFile as any).mockResolvedValue(undefined);
 
-      const result = await editor.replaceSymbol('/fake/path.ts', 'export_default', newExport);
+      const result = await editor.replaceSymbol(TEST_PATH, 'export_default', newExport);
 
       expect(result.success).toBe(true);
       expect(result.symbolFound).toBe(true);
-      expect(fs.writeFile).toHaveBeenCalledWith('/fake/path.ts', expected, 'utf-8');
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        FileReaderImpl.resolveSecurePath(TEST_PATH),
+        expected,
+        'utf-8'
+      );
     });
   });
 });

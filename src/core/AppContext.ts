@@ -227,11 +227,27 @@ export class AppContext {
         const filePath = args.filePath as string;
         const content = await reader.readFile(filePath);
         const lines = content.split('\n');
-        const numbered = lines.map((line, i) => {
+
+        const MAX_LINES_DISPLAY = 1000;
+        const maxDisplayLines = Math.min(lines.length, MAX_LINES_DISPLAY);
+
+        const numbered = lines.slice(0, maxDisplayLines).map((line, i) => {
           const lineNum = String(i + 1).padStart(4, ' ');
           return `${lineNum} | ${line}`;
         });
-        return numbered.join('\n');
+
+        let result = numbered.join('\n');
+
+        if (lines.length > MAX_LINES_DISPLAY) {
+          const cutCount = lines.length - MAX_LINES_DISPLAY;
+          result +=
+            `\n\n⚠️ ATENÇÃO: O arquivo tem ${lines.length} linhas, ` +
+            `mas apenas as primeiras ${MAX_LINES_DISPLAY} foram exibidas ` +
+            `(${cutCount} linhas cortadas). ` +
+            `Se precisar de mais contexto, use readFile para ler o arquivo completo.`;
+        }
+
+        return result;
       }
     );
   }

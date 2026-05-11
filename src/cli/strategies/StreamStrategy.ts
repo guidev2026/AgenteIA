@@ -67,9 +67,10 @@ export class StreamStrategy implements ChatStrategy {
         prompt: finalPrompt,
         temperature: 0.3,
       });
-      process.stdout.write(resp.response);
+      fullResponse = resp.response;
+      process.stdout.write(fullResponse);
       process.stdout.write('\n');
-      return ''; // Já escrevemos no stdout
+      return fullResponse;
     }
 
     // Streaming real (efeito máquina de escrever)
@@ -96,6 +97,6 @@ export class StreamStrategy implements ChatStrategy {
       return `[${model}]\n${fallbackResp.response}`;
     }
 
-    return ''; // Já escrevemos no stdout
+    return fullResponse;
   }
 }
