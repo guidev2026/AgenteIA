@@ -167,54 +167,54 @@ export class AppContext {
     // Tool: editSymbol — edição estrutural de símbolos TypeScript via AST
     this.toolRegistry.register(
       'editSymbol',
-      'Replace a top-level symbol (function, class, interface, variable) in a TypeScript file by name. The symbol must exist in the file. Returns a confirmation with the symbol name and file path on success.',
+      'Edição estrutural cirúrgica APENAS para ficheiros TypeScript (.ts). Substitui um nó AST inteiro (função, classe, interface) pelo seu nome exato.',
       {
         filePath: { type: 'string', description: 'Absolute or relative path to the .ts file' },
         symbolName: { type: 'string', description: 'Name of the top-level symbol to replace' },
         newCode: { type: 'string', description: 'Complete new source code for the symbol' },
       },
       async (args) => {
-        const filePath = args.filePath as string;
-        const symbolName = args.symbolName as string;
-        const newCode = args.newCode as string;
-        const astEditor = new ASTEditor(reader);
-        const result = await astEditor.replaceSymbol(filePath, symbolName, newCode);
-        if (!result.success) {
-          throw new Error(
-            `editSymbol failed for symbol "${symbolName}" in "${filePath}": ${result.error}`
-          );
+        try {
+          const filePath = args.filePath as string;
+          const symbolName = args.symbolName as string;
+          const newCode = args.newCode as string;
+          const safePath = await FileReader.resolveSecurePath(filePath);
+          const astEditor = new ASTEditor(reader);
+          const result = await astEditor.replaceSymbol(safePath, symbolName, newCode);
+          if (!result.success) {
+            return 'Erro na edição AST: Símbolo não encontrado ou ficheiro inválido. Para edições menores, tenta usar a tool searchReplace.';
+          }
+          return `OK: Symbol "${symbolName}" in "${filePath}" has been replaced successfully.`;
+        } catch {
+          return 'Erro na edição AST: Símbolo não encontrado ou ficheiro inválido. Para edições menores, tenta usar a tool searchReplace.';
         }
-        return `OK: Symbol "${symbolName}" in "${filePath}" has been replaced successfully.`;
       }
     );
 
-    // Tool: searchReplace — edição textual por bloco exato com normalização
+    // Tool: searchReplace — edição textual por bloco exato
     this.toolRegistry.register(
       'searchReplace',
-      'Replace an exact block of text in any file. The search block is normalized (CRLF→LF, trailing whitespace removed) before matching, so small whitespace differences are tolerated. Indentation IS significant and must match exactly. Returns the full file path on success.',
+      'Substituição de blocos exatos de texto em qualquer ficheiro. A string de busca (search) tem de ser 100% idêntica ao código atual (incluindo espaços). Usar para ficheiros não-TS ou pequenas edições.',
       {
         filePath: { type: 'string', description: 'Absolute or relative path to the file' },
         searchBlock: { type: 'string', description: 'Exact block of text to find (indentation sensitive)' },
         replaceBlock: { type: 'string', description: 'New block of text to replace with' },
       },
       async (args) => {
-        const filePath = args.filePath as string;
-        const searchBlock = args.searchBlock as string;
-        const replaceBlock = args.replaceBlock as string;
-        const editor = new SearchReplaceEditor(reader);
-        const result = await editor.apply(filePath, searchBlock, replaceBlock);
-        if (!result.success) {
-          if (result.matchCount === 0) {
-            return 'BLOCK_NOT_FOUND: O bloco de busca não foi encontrado no arquivo. Verifique se o código está exatamente como está no arquivo.';
+        try {
+          const filePath = args.filePath as string;
+          const searchBlock = args.searchBlock as string;
+          const replaceBlock = args.replaceBlock as string;
+          const safePath = await FileReader.resolveSecurePath(filePath);
+          const editor = new SearchReplaceEditor(reader);
+          const result = await editor.apply(safePath, searchBlock, replaceBlock);
+          if (!result.success) {
+            return 'Erro no searchReplace: O bloco de busca não foi encontrado com 100% de exatidão. Verifica os espaços em branco e tenta novamente.';
           }
-          if (result.matchCount > 1) {
-            return `AMBIGUOUS_MATCH: O bloco de busca aparece ${result.matchCount} vezes no arquivo. Forneça um bloco mais específico.`;
-          }
-          throw new Error(
-            `searchReplace failed for "${filePath}": ${result.error}`
-          );
+          return `OK: File "${filePath}" has been updated.`;
+        } catch {
+          return 'Erro no searchReplace: O bloco de busca não foi encontrado com 100% de exatidão. Verifica os espaços em branco e tenta novamente.';
         }
-        return `OK: File "${filePath}" has been updated.`;
       }
     );
 
