@@ -171,15 +171,15 @@ describe('StatefulCompressor', () => {
   });
 
   describe('compress - provider exception scenario', () => {
-    it('deve retornar historico original e compressionRatio 1.0 quando provider lanca excecao', async () => {
+    it('deve truncar historico para as ultimas 3 mensagens quando provider lanca excecao', async () => {
       const provider = createMockProvider('', true, 'Network timeout');
       const compressor = new StatefulCompressor(provider);
       const history = createHistory(10);
       const result = await compressor.compress(history, 'test-model', 'system prompt');
 
-      // Deve retornar o histórico completo
-      expect(result.keptMessages).toHaveLength(10);
-      expect(result.keptMessages).toEqual(history);
+      // Deve retornar apenas as últimas 3 mensagens para evitar loop infinito
+      expect(result.keptMessages).toHaveLength(3);
+      expect(result.keptMessages).toEqual(history.slice(-3));
 
       // workingMemory deve ser vazio
       expect(result.workingMemory).toBe('');
@@ -199,7 +199,7 @@ describe('StatefulCompressor', () => {
       ).resolves.not.toThrow();
 
       const result = await compressor.compress(history, 'test-model', 'system prompt');
-      expect(result.keptMessages).toHaveLength(8);
+      expect(result.keptMessages).toHaveLength(3);
       expect(result.workingMemory).toBe('');
       expect(result.compressionRatio).toBe(1.0);
     });

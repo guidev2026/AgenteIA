@@ -24,6 +24,9 @@ dist/
 .DS_Store
 Thumbs.db
 
+# Temp test files
+tests/integration/.tmp/
+
 # Logs
 logs/
 *.log

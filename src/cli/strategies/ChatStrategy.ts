@@ -70,7 +70,8 @@ export async function buildSystemPrompt(
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(`⚠️ RAG error (continuando sem contexto): ${msg}`);
+      console.error(`⚠️ RAG error (injetando aviso no contexto): ${msg}`);
+      ragContext = '⚠️ [AVISO DO SISTEMA: Falha ao buscar contexto no RAG. Responda com base apenas no seu conhecimento prévio]';
     }
   }
 

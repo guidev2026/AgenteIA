@@ -8,7 +8,7 @@
  * ═══════════════════════════════════════════════════════════════════════════
  *
  * Pipeline simulado:
- * 1. Cria arquivo TypeScript temporário em os.tmpdir()
+ * 1. Cria arquivo TypeScript temporário em tests/integration/.tmp/
  * 2. ASTEditor.replaceSymbol() → substitui função por nome de símbolo
  * 3. Verifica que o arquivo foi alterado corretamente
  * 4. Cria arquivo não-TypeScript (texto) temporário
@@ -17,21 +17,24 @@
  * 7. Limpeza: afterEach deleta todos os arquivos temporários
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import * as os from 'node:os';
 import { FileReader } from '../../src/core/FileReader';
 import { ASTEditor } from '../../src/core/ASTEditor';
 import { SearchReplaceEditor } from '../../src/core/SearchReplaceEditor';
 
 // ── Helpers ──────────────────────────────────────────────────────
 
+/** Diretório temporário dentro do projeto (respeita FileReader.resolveSecurePath) */
+const TMP_DIR = path.join(process.cwd(), 'tests', 'integration', '.tmp');
+
 const tmpFiles: string[] = [];
 
 /** Cria um arquivo temporário com conteúdo e registra para limpeza */
 async function createTempFile(filename: string, content: string): Promise<string> {
-  const filePath = path.join(os.tmpdir(), filename);
+  await fs.mkdir(TMP_DIR, { recursive: true });
+  const filePath = path.join(TMP_DIR, filename);
   await fs.writeFile(filePath, content, 'utf-8');
   tmpFiles.push(filePath);
   return filePath;
@@ -42,7 +45,20 @@ async function readFile(filePath: string): Promise<string> {
   return await fs.readFile(filePath, 'utf-8');
 }
 
-// ── Cleanup ──────────────────────────────────────────────────────
+// ── Setup / Teardown ─────────────────────────────────────────────
+
+beforeAll(async () => {
+  await fs.mkdir(TMP_DIR, { recursive: true });
+});
+
+afterAll(async () => {
+  // Remove diretório temporário e todo o seu conteúdo
+  try {
+    await fs.rm(TMP_DIR, { recursive: true, force: true });
+  } catch {
+    // Ignora se já foi removido
+  }
+});
 
 afterEach(async () => {
   for (const f of tmpFiles) {
@@ -214,6 +230,7 @@ describe('Editing Pipeline — Integração com Filesystem Real', () => {
 
     expect(result.success).toBe(false);
     expect(result.matchCount).toBe(0);
+    // O erro será sobre bloco não encontrado, não sobre caminho negado
     expect(result.error).toContain('não encontrado');
   });
 
@@ -286,7 +303,7 @@ describe('Editing Pipeline — Integração com Filesystem Real', () => {
     expect(content).toContain('console.warn("Division by zero detected")');
     expect(content).toContain('return NaN;');
     expect(content).toContain('// src/calculator.ts — with NaN-safe divide');
-    expect(content).not.toContain('// TODO: documentar');
+    expect(content).not.toContain('TODO: documentar');
     expect(content).not.toContain('throw new Error("Division by zero")');
     expect(content).toContain('export { multiply, divide };');
   });

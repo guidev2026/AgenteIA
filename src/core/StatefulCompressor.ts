@@ -167,12 +167,13 @@ export class StatefulCompressor implements IContextCompressor {
         compressionRatio,
       };
     } catch (err) {
-      // Provider lançou exceção — loga erro e retorna sem compressão
+      // Provider lançou exceção (ex: limite de contexto) — loga erro e
+      // trunca mecanicamente para evitar loop infinito no ReAct.
       const errorMessage = err instanceof Error ? err.message : String(err);
-      console.error(`[StatefulCompressor] Provider error: ${errorMessage}`);
+      console.error(`[StatefulCompressor] Provider error: ${errorMessage} — truncando histórico para ${KEEP_LAST} mensagens.`);
       return {
         workingMemory: '',
-        keptMessages: history,
+        keptMessages: history.slice(-KEEP_LAST),
         compressionRatio: 1.0,
       };
     }
