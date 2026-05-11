@@ -91,6 +91,26 @@ export async function buildSystemPrompt(
     toolDefinitions,
   ];
 
+  // ── WORKFLOW DE ENGENHARIA OBRIGATÓRIO (sempre presente) ──
+  systemPromptParts.push(
+    '',
+    'WORKFLOW DE ENGENHARIA OBRIGATÓRIO:',
+    'TU ÉS OBRIGATÓRIO A SEGUIR EXATAMENTE ESTES PASSOS ANTES DE GERAR A RESPOSTA FINAL:',
+    '',
+    'PASSO 1 (Contexto): Usa a tool readFile ou confia no contexto RAG para entender a estrutura atual antes de agir.',
+    '',
+    'PASSO 2 (Execução): Usa writeFile para novos ficheiros, ou editSymbol/searchReplace para alterar ficheiros existentes.',
+    '',
+    'PASSO 3 (Validação Autônoma): É OBRIGATÓRIO usar a tool execute para correr \'npm test\', \'tsc\' ou o comando adequado para testar o código acabado de alterar.',
+    '',
+    'PASSO 4 (Auto-Correção): Se o passo 3 falhar, lê a saída de erro do terminal e repete o PASSO 2 sozinho.',
+    '',
+    'PASSO 5 (Conclusão): Só gera a resposta final de texto para o utilizador quando o código estiver validado e a funcionar.',
+    '',
+    'NUNCA DÊ A RESPOSTA FINAL ANTES DE COMPLETAR TODOS OS PASSOS ACIMA.',
+    ''
+  );
+
   // ── Bloco condicional de workflow de edição ──
   const hasEditTools = toolNameList.includes('editSymbol') || toolNameList.includes('searchReplace');
   if (hasEditTools) {

@@ -97,6 +97,22 @@ describe('ChatStrategy — buildSystemPrompt', () => {
     expect(prompt).not.toContain('WORKFLOW DE EDIÇÃO:');
   });
 
+  it('deve incluir WORKFLOW DE ENGENHARIA OBRIGATÓRIO mesmo sem ferramentas de edição', async () => {
+    const toolRegistry = makeToolRegistry([]);
+    const app = makeMockApp(toolRegistry);
+
+    const prompt = await buildSystemPrompt(app, 'teste', false);
+
+    expect(prompt).toContain('WORKFLOW DE ENGENHARIA OBRIGATÓRIO:');
+    expect(prompt).toContain('PASSO 1 (Contexto)');
+    expect(prompt).toContain('PASSO 2 (Execução)');
+    expect(prompt).toContain('PASSO 3 (Validação Autônoma)');
+    expect(prompt).toContain('PASSO 4 (Auto-Correção)');
+    expect(prompt).toContain('PASSO 5 (Conclusão)');
+    expect(prompt).toContain('NUNCA DÊ A RESPOSTA FINAL');
+    expect(prompt).toContain('TU ÉS OBRIGATÓRIO');
+  });
+
   it('bloco de workflow deve ter no máximo 15 linhas', async () => {
     const toolRegistry = makeToolRegistry(['editSymbol', 'searchReplace']);
     const app = makeMockApp(toolRegistry);
