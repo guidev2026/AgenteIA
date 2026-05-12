@@ -26,6 +26,17 @@ export interface SearchResult {
  * `resolveSecurePath` para prevenir Path Traversal (escapar do diretório do projeto).
  */
 export class FileReader {
+  private readonly baseDir: string;
+
+  /**
+   * @param baseDir Diretório raiz do projeto. Se não informado, usa process.cwd().
+   *                 Todas as operações de sistema de arquivos serão validadas contra
+   *                 este diretório, prevenindo Path Traversal.
+   */
+  constructor(baseDir?: string) {
+    this.baseDir = baseDir ?? process.cwd();
+  }
+
   /**
    * Resolve um caminho de usuário e valida que ele está dentro do diretório do projeto.
    *
@@ -41,11 +52,35 @@ export class FileReader {
    * @returns Caminho absoluto seguro dentro do projeto (com symlinks resolvidos)
    * @throws Error se o caminho resolvido estiver fora do diretório do projeto
    */
-  static async resolveSecurePath(userPath: string): Promise<string> {
-    const rootDir = process.cwd();
+  static async resolveSecurePath(userPath: string, baseDir?: string): Promise<string> {
+    const rootDir = baseDir ?? process.cwd();
     const resolved = path.resolve(userPath);
-    const realResolved = await fsp.realpath(resolved);
     const realRoot = await fsp.realpath(rootDir);
+
+    // Tenta resolver symlinks do caminho completo.
+    // Se o ficheiro não existir (ENOENT), resolve pelo diretório pai
+    // para ainda validar que está dentro do projeto.
+    let realResolved: string;
+    try {
+      realResolved = await fsp.realpath(resolved);
+    } catch (err: any) {
+      if (err.code === 'ENOENT') {
+        // Caminho não existe no disco → resolve pelo diretório pai
+        const parentDir = path.dirname(resolved);
+        try {
+          const realParent = await fsp.realpath(parentDir);
+          realResolved = path.join(realParent, path.basename(resolved));
+        } catch {
+          throw new Error(
+            `Acesso negado: Não foi possível resolver o caminho "${resolved}". ` +
+            `O diretório pai também não existe ou está inacessível.`
+          );
+        }
+      } else {
+        throw err; // Outro erro (permissão, etc) — relança
+      }
+    }
+
     if (!realResolved.startsWith(realRoot)) {
       throw new Error(
         `Acesso negado: O caminho "${resolved}" (real: "${realResolved}") está fora do diretório do projeto "${rootDir}" (real: "${realRoot}").`
@@ -67,8 +102,8 @@ export class FileReader {
    * @returns Conteúdo textual do arquivo
    */
   async readFile(filePath: string): Promise<string> {
-    const safePath = await FileReader.resolveSecurePath(filePath);
     try {
+      const safePath = await FileReader.resolveSecurePath(filePath, this.baseDir);
       return await fsp.readFile(safePath, 'utf-8');
     } catch (err: any) {
       throw new Error(`Failed to read file "${filePath}": ${err.message}`);
@@ -87,7 +122,7 @@ export class FileReader {
    * @returns Array com os nomes dos arquivos/diretórios dentro de dirPath
    */
   async readDir(dirPath: string): Promise<string[]> {
-    const safePath = await FileReader.resolveSecurePath(dirPath);
+    const safePath = await FileReader.resolveSecurePath(dirPath, this.baseDir);
     try {
       return await fsp.readdir(safePath);
     } catch (err: any) {

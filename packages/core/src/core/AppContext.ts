@@ -37,6 +37,10 @@ export interface AppContextConfig {
   ragDir?: string;
   sessionId?: string;
   newSession?: boolean;
+  /** Diretório raiz do projeto para operações de sistema de arquivos.
+   *  Se não informado, usa process.cwd(). No Electron, deve apontar para
+   *  a raiz do monorepo (ex: __dirname/../../..). */
+  baseDir?: string;
 }
 
 export class AppContext {
@@ -49,10 +53,12 @@ export class AppContext {
   public readonly jsonMode: boolean;
   public readonly ragDir: string | undefined;
   public readonly sessionManager: SessionManager;
+  public readonly baseDir: string | undefined;
 
   constructor(config: AppContextConfig) {
     // Utilitários base — sempre os mesmos
-    this.fileReader = new FileReader();
+    this.baseDir = config.baseDir;
+    this.fileReader = new FileReader(this.baseDir);
     this.commandExecutor = new CommandExecutor();
 
     // Provider via fábrica (OCP) — fácil de estender para novos providers
@@ -178,7 +184,7 @@ export class AppContext {
           const filePath = args.filePath as string;
           const symbolName = args.symbolName as string;
           const newCode = args.newCode as string;
-          const safePath = await FileReader.resolveSecurePath(filePath);
+          const safePath = await FileReader.resolveSecurePath(filePath, this.baseDir);
           const astEditor = new ASTEditor(reader);
           const result = await astEditor.replaceSymbol(safePath, symbolName, newCode);
           if (!result.success) {
@@ -205,7 +211,7 @@ export class AppContext {
           const filePath = args.filePath as string;
           const searchBlock = args.searchBlock as string;
           const replaceBlock = args.replaceBlock as string;
-          const safePath = await FileReader.resolveSecurePath(filePath);
+          const safePath = await FileReader.resolveSecurePath(filePath, this.baseDir);
           const editor = new SearchReplaceEditor(reader);
           const result = await editor.apply(safePath, searchBlock, replaceBlock);
           if (!result.success) {
@@ -230,7 +236,7 @@ export class AppContext {
         const filePath = args.filePath as string;
         const content = args.content as string;
         try {
-          const safePath = await FileReader.resolveSecurePath(filePath);
+          const safePath = await FileReader.resolveSecurePath(filePath, this.baseDir);
           await fsp.mkdir(path.dirname(safePath), { recursive: true });
           await fsp.writeFile(safePath, content, 'utf-8');
           return `Ficheiro "${filePath}" criado/atualizado com sucesso.`;

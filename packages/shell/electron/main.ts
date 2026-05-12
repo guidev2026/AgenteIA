@@ -5,6 +5,14 @@ import type { ReActMessage, LogPayload } from '@soberano/core';
 
 const VITE_DEV_SERVER_URL = 'http://localhost:5173';
 
+/**
+ * Diretório raiz do monorepo.
+ * __dirname em dev: packages/shell/electron (compilado para .js)
+ * Subimos 2 níveis para chegar na raiz do monorepo (AgenteIA).
+ */
+const MONOREPO_ROOT = path.resolve(__dirname, '..', '..', '..');
+console.log(`[Init] Monorepo root: ${MONOREPO_ROOT}`);
+
 let appContext: AppContext | null = null;
 
 // ── Persistência de Memória (Histórico Multi-turn) ──
@@ -55,12 +63,16 @@ function createWindow(): void {
  * ferramentas como readDir.
  *
  * @param toolRegistryJson JSON string com as definições das ferramentas
+ * @param baseDir Caminho absoluto para a raiz do monorepo (ex: /home/user/Documentos/estudos/AgenteIA)
  * @returns System prompt completo com instruções + ferramentas disponíveis
  */
-function buildSystemPrompt(toolRegistryJson: string): string {
+function buildSystemPrompt(toolRegistryJson: string, baseDir: string): string {
   let prompt =
     'You are Soberano-Core, an AI assistant running locally via Ollama. ' +
     'You have access to tools for reading files, executing commands, and editing code.\n\n' +
+    `Seu diretório base de trabalho é "${baseDir}". ` +
+    'Sempre use caminhos relativos a partir deste diretório ou caminhos absolutos completos ' +
+    `iniciando em "${baseDir}" para todas as operações de sistema de arquivos.\n\n` +
     'You MUST respond with valid JSON in one of these two formats:\n' +
     '1. {"tool_call": "<toolName>", "args": {...}} — to call a tool and get results\n' +
     '2. {"final_response": "<your answer>"} — to give the final answer to the user\n\n' +
@@ -100,6 +112,30 @@ function buildSystemPrompt(toolRegistryJson: string): string {
   return prompt;
 }
 
+/**
+ * checkOllamaStatus — Verifica se o motor Ollama está respondendo.
+ *
+ * Retorna 'online' se o endpoint /api/tags responder dentro de 5 segundos,
+ * ou 'offline' em caso de falha (timeout, rede, servidor desligado).
+ */
+async function checkOllamaStatus(): Promise<'online' | 'offline'> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const response = await fetch('http://localhost:11434/api/tags', {
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (response.ok) {
+      return 'online';
+    }
+    return 'offline';
+  } catch {
+    return 'offline';
+  }
+}
+
 app.whenReady().then(async () => {
   // ── Inicializa o AppContext (DIP Container) ──
   // O Core não sabe que o Electron existe. A injeção é feita via bridge,
@@ -107,6 +143,7 @@ app.whenReady().then(async () => {
   appContext = new AppContext({
     provider: { type: 'ollama', host: 'localhost', port: 11434 },
     model: 'qwen2.5-coder:3b',
+    baseDir: MONOREPO_ROOT,
   });
 
   console.log('[IPC] AppContext initialized with Ollama provider');
@@ -120,7 +157,7 @@ app.whenReady().then(async () => {
   // GARANTE que toda ferramenta registrada (incluindo readDir) seja
   // listada para o modelo, sem duplicação manual.
   const toolDefinitions = appContext.toolRegistry.getDefinitions();
-  const SYSTEM_PROMPT = buildSystemPrompt(toolDefinitions);
+  const SYSTEM_PROMPT = buildSystemPrompt(toolDefinitions, MONOREPO_ROOT);
 
   // ── IPC Handler: Ponte de Soberania ──
   // Renderer → IPC Bridge → Core (ReActLoop) → Resposta → Renderer
@@ -210,6 +247,30 @@ app.whenReady().then(async () => {
   });
 
   createWindow();
+
+  // ── Health-Check Indicator: Polling do motor Ollama ──
+  // A cada 10 segundos, verifica se o Ollama está respondendo e emite
+  // o status em tempo real para o frontend via IPC.
+  // Inicia imediatamente após a criação da janela.
+  const healthInterval = setInterval(async () => {
+    if (!mainWebContents || mainWebContents.isDestroyed()) {
+      // Se a janela foi fechada, para o polling
+      clearInterval(healthInterval);
+      return;
+    }
+
+    const status = await checkOllamaStatus();
+    console.log(`[HealthCheck] Status: ${status}`);
+    mainWebContents.send('ollama:status', status);
+  }, 10_000);
+
+  // Executa o primeiro health-check imediatamente (sem esperar 10s)
+  (async () => {
+    if (!mainWebContents || mainWebContents.isDestroyed()) return;
+    const status = await checkOllamaStatus();
+    console.log(`[HealthCheck] Initial status: ${status}`);
+    mainWebContents.send('ollama:status', status);
+  })();
 });
 
 app.on('window-all-closed', () => {
