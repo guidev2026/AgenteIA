@@ -3,18 +3,30 @@ import React, { useState } from 'react';
 /**
  * App component — Main entry point for the Electron Shell.
  *
- * This component imports types from @soberano/core to demonstrate
- * cross-package dependency within the monorepo.
+ * This component implements the IPC Bridge (Ponte de Soberania):
+ * - Sends prompts to the main process via window.api.askSoberano
+ * - Displays the response from the Node.js backend
  */
-import type { AppContextConfig } from '@soberano/core';
-
 const App: React.FC = () => {
-  const [message, setMessage] = useState<string>('Soberano-Core Agent IA');
+  const [prompt, setPrompt] = useState<string>('');
+  const [response, setResponse] = useState<string>('');
+  const [loading, setLoading] = useState<boolean>(false);
 
-  // Verify core type import works
-  const _config: AppContextConfig = {
-    provider: { type: 'ollama', host: 'localhost', port: 11434 },
-    model: 'llama3.2:1b',
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!prompt.trim()) return;
+
+    setLoading(true);
+    setResponse('');
+
+    try {
+      const result = await window.api.askSoberano(prompt);
+      setResponse(result);
+    } catch (err) {
+      setResponse(`Erro: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -27,33 +39,76 @@ const App: React.FC = () => {
       fontFamily: 'system-ui, -apple-system, sans-serif',
       backgroundColor: '#0a0a0a',
       color: '#e0e0e0',
+      padding: '2rem',
     }}>
       <h1 style={{ fontSize: '2rem', marginBottom: '0.5rem' }}>
-        🛡️ {message}
+        🛡️ Soberano-Core
       </h1>
-      <p style={{ color: '#888', fontSize: '0.9rem' }}>
-        Electron + Vite + React + TypeScript
+      <p style={{ color: '#888', fontSize: '0.9rem', marginBottom: '2rem' }}>
+        Ponte de Soberania (IPC Bridge) — Electron + React + TypeScript
       </p>
-      <div style={{ marginTop: '2rem', display: 'flex', gap: '1rem' }}>
-        <span style={{
-          padding: '0.25rem 0.75rem',
-          borderRadius: '4px',
+
+      <form onSubmit={handleSubmit} style={{
+        display: 'flex',
+        gap: '0.5rem',
+        marginBottom: '2rem',
+        width: '100%',
+        maxWidth: '500px',
+      }}>
+        <input
+          type="text"
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+          placeholder="Digite sua mensagem..."
+          disabled={loading}
+          style={{
+            flex: 1,
+            padding: '0.75rem 1rem',
+            borderRadius: '6px',
+            border: '1px solid #333',
+            backgroundColor: '#1a1a2e',
+            color: '#e0e0e0',
+            fontSize: '1rem',
+            outline: 'none',
+          }}
+        />
+        <button
+          type="submit"
+          disabled={loading || !prompt.trim()}
+          style={{
+            padding: '0.75rem 1.5rem',
+            borderRadius: '6px',
+            border: 'none',
+            backgroundColor: loading ? '#444' : '#4fc3f7',
+            color: '#0a0a0a',
+            fontSize: '1rem',
+            fontWeight: 600,
+            cursor: loading ? 'not-allowed' : 'pointer',
+            transition: 'background-color 0.2s',
+          }}
+        >
+          {loading ? 'Enviando...' : 'Enviar'}
+        </button>
+      </form>
+
+      {response && (
+        <div style={{
+          padding: '1rem 1.5rem',
+          borderRadius: '8px',
           background: '#1a1a2e',
-          color: '#4fc3f7',
-          fontSize: '0.8rem',
+          border: '1px solid #333',
+          maxWidth: '500px',
+          width: '100%',
+          wordBreak: 'break-word',
         }}>
-          packages/core
-        </span>
-        <span style={{
-          padding: '0.25rem 0.75rem',
-          borderRadius: '4px',
-          background: '#1a2e1a',
-          color: '#66bb6a',
-          fontSize: '0.8rem',
-        }}>
-          packages/shell
-        </span>
-      </div>
+          <p style={{ color: '#4fc3f7', fontSize: '0.8rem', marginBottom: '0.5rem', fontWeight: 600 }}>
+            Resposta do Core:
+          </p>
+          <p style={{ color: '#e0e0e0', fontSize: '1rem', margin: 0 }}>
+            {response}
+          </p>
+        </div>
+      )}
     </div>
   );
 };
