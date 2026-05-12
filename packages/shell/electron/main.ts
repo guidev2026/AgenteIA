@@ -5,15 +5,30 @@ import type { ReActMessage, LogPayload } from '@soberano/core';
 
 const VITE_DEV_SERVER_URL = 'http://localhost:5173';
 
+let appContext: AppContext | null = null;
+
 /**
  * Diretório raiz do monorepo.
- * __dirname em dev: packages/shell/electron (compilado para .js)
- * Subimos 2 níveis para chegar na raiz do monorepo (AgenteIA).
+ * Em desenvolvimento (dev): __dirname = packages/shell/electron → sobe 3 níveis até a raiz
+ * Em produção (packaged): app.getAppPath() retorna o diretório raiz do app,
+ *   e subimos "../../" devido à estrutura packages/shell/electron.
+ *
+ * A lógica resolve ambos os cenários garantindo que a Sandbox do agente
+ * aponte para a raiz absoluta do monorepo AgenteIA.
  */
-const MONOREPO_ROOT = path.resolve(__dirname, '..', '..', '..');
-console.log(`[Init] Monorepo root: ${MONOREPO_ROOT}`);
+function resolveMonorepoRoot(): string {
+  if (app.isPackaged) {
+    // Modo produção: app.getAppPath() retorna o diretório do app
+    return path.resolve(app.getAppPath(), '../../');
+  }
+  // Modo desenvolvimento: __dirname = packages/shell/electron (compilado)
+  return path.resolve(__dirname, '..', '..', '..');
+}
 
-let appContext: AppContext | null = null;
+const MONOREPO_ROOT = resolveMonorepoRoot();
+console.log(`[Init] Monorepo root: ${MONOREPO_ROOT}`);
+console.log(`[Init] app.isPackaged: ${app.isPackaged}`);
+console.log(`[Init] __dirname: ${__dirname}`);
 
 // ── Persistência de Memória (Histórico Multi-turn) ──
 // Mantém o histórico entre chamadas IPC, permitindo continuidade
@@ -73,6 +88,12 @@ function buildSystemPrompt(toolRegistryJson: string, baseDir: string): string {
     `Seu diretório base de trabalho é "${baseDir}". ` +
     'Sempre use caminhos relativos a partir deste diretório ou caminhos absolutos completos ' +
     `iniciando em "${baseDir}" para todas as operações de sistema de arquivos.\n\n` +
+
+    // ── Autoridade Administrativa Total sobre o Monorepo ──
+    `Você é o Soberano 2.0 e possui permissão administrativa total sobre o diretório "${baseDir}". ` +
+    'Não peça permissão para ler ou escrever. Se receber "Acesso Negado", valide o caminho com ' +
+    'readDir antes de reportar falha. Sua prioridade é autonomia total no monorepo.\n\n' +
+
     'You MUST respond with valid JSON in one of these two formats:\n' +
     '1. {"tool_call": "<toolName>", "args": {...}} — to call a tool and get results\n' +
     '2. {"final_response": "<your answer>"} — to give the final answer to the user\n\n' +
@@ -142,7 +163,7 @@ app.whenReady().then(async () => {
   // mantendo o desacoplamento SOLID.
   appContext = new AppContext({
     provider: { type: 'ollama', host: 'localhost', port: 11434 },
-    model: 'qwen2.5-coder:3b',
+    model: 'qwen2.5-coder:7b',
     baseDir: MONOREPO_ROOT,
   });
 
@@ -231,9 +252,10 @@ app.whenReady().then(async () => {
       // Adiciona a resposta final como mensagem do assistente
       chatHistory.push({ role: 'assistant', content: answer });
 
-      // Evita crescimento infinito do histórico: mantém no máximo 50 mensagens
-      if (chatHistory.length > 50) {
-        const overflow = chatHistory.length - 50;
+      // Evita crescimento infinito do histórico: mantém no máximo 15 mensagens
+      // Limite reduzido para ambiente de 12GB RAM com qwen2.5-coder:7b
+      if (chatHistory.length > 15) {
+        const overflow = chatHistory.length - 15;
         chatHistory = chatHistory.slice(overflow);
         console.log(`[ReActLoop] Histórico truncado (removeu ${overflow} mensagens antigas)`);
       }
