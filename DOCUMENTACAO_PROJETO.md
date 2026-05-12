@@ -1043,7 +1043,7 @@ AgenteIA/
 - ✅ **SessionStore** refatorada com interface `ISessionStore` (DIP) e `ReActMessage` tipada do `ReActLoop`
 - ✅ **RAGManager** refatorado com injeção de dependências via construtor (DIP) — removeu `PromptBuilder.ts` (arquivo deletado, duplicado)
 - ✅ **ASTEditor e SearchReplaceEditor** corrigidos para usar `await` em `resolveSecurePath()`
-- ✅ **308 testes unitários** passando com Vitest (25 arquivos de teste: ToolRegistry, CommandExecutor, Reflector, ErrorJournal, SessionStore, SessionManager, OllamaProvider, Retriever, ReActLoop, Chunker, TypescriptASTAdapter, ASTChunkerService, JsonValidator, commands, JsonGraphStore, ASTRelationshipExtractor, GraphBuilder, GraphRAGManager, ChatStrategy, ASTEditor, SearchReplaceEditor, TokenEstimator, StatefulCompressor, IContextCompressor, GraphRAGManager)
+- ✅ **309 testes unitários** passando com Vitest (25 arquivos de teste: ToolRegistry, CommandExecutor, Reflector, ErrorJournal, SessionStore, SessionManager, OllamaProvider, Retriever, ReActLoop, Chunker, TypescriptASTAdapter, ASTChunkerService, JsonValidator, commands, JsonGraphStore, ASTRelationshipExtractor, GraphBuilder, GraphRAGManager, ChatStrategy, ASTEditor, SearchReplaceEditor, TokenEstimator, StatefulCompressor, IContextCompressor, GraphRAGManager)
 
 📝 **Possíveis próximos passos (não implementados):**
 - [já implementado] ~~Adicionar streaming de respostas do Ollama (SSE)~~
@@ -1093,20 +1093,23 @@ ReActLoop.emitLog()
 
 **Objetivo:** Área de logs persistente no rodapé do App.tsx com fundo preto estilo terminal.
 
-#### Layout:
+#### Layout (Task 1.2.1 — Console de Raciocínio):
 ```
-┌───────────────────────────────────┐
-│  🛡️ Soberano-Core (header)       │
-├───────────────────────────────────┤
-│  [input "Digite sua mensagem..."] │
-│  [▶ Enviar]                       │
-│  📦 Resposta Final (border verde) │
-├───────────────────────────────────┤
-│  [12:34:56.789] INFO  [1] 🚀      │
-│  [12:34:57.012] INFO  [2] 🔧 → toolName │
-│  [12:34:57.345] WARN  [2] ⚠️      │
-│  [12:34:58.100] ERR   [2] ❌      │  ← auto-scroll
-└───────────────────────────────────┘
+┌───────────────────────────────────────┐
+│  🛡️ Soberano-Core (header)           │
+├───────────────────────────────────────┤
+│  💬 Área de Chat (flex:1)             │
+│  📦 Resposta Final (border verde)     │
+├───────────────────────────────────────┤
+│  CONSOLE DE RACIOCÍNIO (200px fixo)   │
+│  [12:34:56.789] INFO  [1] 🚀          │
+│  [12:34:57.012] INFO  [2] 🔧 → tool  │
+│  [12:34:57.345] WARN  [2] ⚠️          │
+│  [12:34:58.100] ERR   [2] ❌ ← scroll │
+├───────────────────────────────────────┤
+│  ⌨️ Input Form (fixo no rodapé)       │
+│  [Ex: Leia /caminho/package.json]  ▶  │
+└───────────────────────────────────────┘
 ```
 
 #### Especificações técnicas:

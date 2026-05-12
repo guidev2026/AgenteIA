@@ -2,15 +2,17 @@ import React, { useState, useEffect, useRef } from 'react';
 import type { LogPayload } from './vite-env';
 
 /**
- * App — Interface principal do Soberano-Core (Ponte de Soberania).
+ * App — Interface principal do Soberano-Core.
  *
- * Layout:
+ * Layout Task 1.2.1:
  * ┌──────────────────────────────────────┐
  * │  🛡️ Header                          │
  * ├──────────────────────────────────────┤
- * │  💬 Chat (entrada + resposta final)  │
+ * │  💬 Área de Chat (resposta final)    │
  * ├──────────────────────────────────────┤
- * │  🖥️ Soberano Console (logs ao vivo) │
+ * │  🖥️ CONSOLE DE RACIOCÍNIO (200px)   │
+ * ├──────────────────────────────────────┤
+ * │  ⌨️ Input Form (fixo no rodapé)     │
  * └──────────────────────────────────────┘
  */
 const App: React.FC = () => {
@@ -93,6 +95,8 @@ const App: React.FC = () => {
     return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3, '0')}`;
   };
 
+  // Layout principal: tudo ocupa viewport com flex column
+  // Áreas: Header (auto) → Chat (flex:1) → Console (200px fixo) → Input (auto)
   return (
     <div style={{
       display: 'flex',
@@ -127,58 +131,16 @@ const App: React.FC = () => {
         </p>
       </header>
 
-      {/* ── Área de Chat (input + resposta final) ── */}
+      {/* ── Área de Chat (resposta final) — ocupa espaço flexível ── */}
       <div style={{
+        flex: 1,
+        overflowY: 'auto',
         padding: '1rem 1.5rem',
         backgroundColor: '#0d0d0d',
         borderBottom: '1px solid #1a1a1a',
       }}>
-        {/* Input */}
-        <form onSubmit={handleSubmit} style={{
-          display: 'flex',
-          gap: '0.5rem',
-          marginBottom: response ? '1rem' : 0,
-        }}>
-          <input
-            type="text"
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            placeholder="$ Digite sua mensagem para o Soberano..."
-            disabled={loading}
-            style={{
-              flex: 1,
-              padding: '0.7rem 1rem',
-              borderRadius: '4px',
-              border: '1px solid #333',
-              backgroundColor: '#1a1a2e',
-              color: '#e0e0e0',
-              fontSize: '0.9rem',
-              fontFamily: 'inherit',
-              outline: 'none',
-            }}
-          />
-          <button
-            type="submit"
-            disabled={loading || !prompt.trim()}
-            style={{
-              padding: '0.7rem 1.4rem',
-              borderRadius: '4px',
-              border: 'none',
-              backgroundColor: loading ? '#333' : '#4ec9b0',
-              color: loading ? '#666' : '#0a0a0a',
-              fontSize: '0.85rem',
-              fontWeight: 700,
-              fontFamily: 'inherit',
-              cursor: loading ? 'not-allowed' : 'pointer',
-              transition: 'background-color 0.15s',
-            }}
-          >
-            {loading ? '⏳ Processando...' : '▶ Enviar'}
-          </button>
-        </form>
-
         {/* Resposta Final */}
-        {response && (
+        {response ? (
           <div style={{
             padding: '0.75rem 1rem',
             borderRadius: '4px',
@@ -205,92 +167,178 @@ const App: React.FC = () => {
               {response}
             </p>
           </div>
-        )}
-      </div>
-
-      {/* ── Soberano Console (Terminal de Logs) ── */}
-      <div style={{
-        flex: 1,
-        overflowY: 'auto',
-        padding: '0.5rem 0.75rem',
-        backgroundColor: '#1e1e1e',  // fundo preto estilo terminal
-        fontFamily: "'Cascadia Code', 'Fira Code', 'Consolas', monospace",
-        fontSize: '0.8rem',
-        lineHeight: 1.5,
-      }}>
-        {/* Placeholder quando não há logs */}
-        {logs.length === 0 && (
-          <p style={{
+        ) : (
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            height: '100%',
             color: '#555',
-            textAlign: 'center',
-            marginTop: '2rem',
             fontStyle: 'italic',
+            fontSize: '0.85rem',
           }}>
             {loading
-              ? '⏳ Aguardando logs do motor Soberano...'
-              : '💤 Nenhum log ainda. Envie uma mensagem para começar.'
+              ? '⏳ Aguardando resposta do Soberano...'
+              : '💬 Envie uma mensagem para o Soberano'
             }
-          </p>
-        )}
-
-        {/* Renderização das linhas de log */}
-        {logs.map((log, index) => (
-          <div
-            key={index}
-            style={{
-              padding: '0.15rem 0',
-              color: getLogColor(log.level),
-              wordBreak: 'break-word',
-            }}
-          >
-            {/* Timestamp (cinza escuro) */}
-            <span style={{ color: '#555', marginRight: '0.75rem' }}>
-              [{formatTime(log.timestamp)}]
-            </span>
-
-            {/* Nível (abreviado + cor) */}
-            <span style={{
-              display: 'inline-block',
-              width: '3rem',
-              textTransform: 'uppercase',
-              fontWeight: 700,
-              color: getLogColor(log.level),
-              marginRight: '0.5rem',
-            }}>
-              {log.level === 'info'
-                ? 'INFO'
-                : log.level === 'warn'
-                ? 'WARN'
-                : log.level === 'error'
-                ? 'ERR '
-                : 'DBUG'
-              }
-            </span>
-
-            {/* Iteração */}
-            <span style={{ color: '#808080', marginRight: '0.5rem' }}>
-              [{log.iteration}]
-            </span>
-
-            {/* Mensagem principal */}
-            <span>{log.message}</span>
-
-            {/* Nome da ferramenta (quando presente) */}
-            {log.data?.toolName != null && (
-              <span style={{
-                color: '#569cd6',
-                marginLeft: '0.5rem',
-                fontSize: '0.75rem',
-              }}>
-                → {String(log.data.toolName)}
-              </span>
-            )}
           </div>
-        ))}
-
-        {/* âncora para auto-scroll */}
-        <div ref={consoleEndRef} />
+        )}
       </div>
+
+      {/* ── CONSOLE DE RACIOCÍNIO (REACT ENGINE) — 200px fixo ── */}
+      <div style={{
+        height: '200px',
+        borderTop: '2px solid #333',
+        display: 'flex',
+        flexDirection: 'column',
+        backgroundColor: '#1e1e1e',
+      }}>
+        {/* Label do terminal */}
+        <div style={{
+          padding: '4px 12px',
+          fontSize: '10px',
+          color: '#aaa',
+          backgroundColor: '#2d2d2d',
+          borderBottom: '1px solid #333',
+          userSelect: 'none',
+          textTransform: 'uppercase',
+          letterSpacing: '0.08em',
+        }}>
+          CONSOLE DE RACIOCÍNIO (REACT ENGINE)
+        </div>
+
+        {/* Corpo do terminal com scroll */}
+        <div style={{
+          flex: 1,
+          overflowY: 'auto',
+          padding: '10px',
+          fontFamily: "'Cascadia Code', 'Fira Code', 'Consolas', monospace",
+          fontSize: '12px',
+          lineHeight: 1.5,
+        }}>
+          {/* Placeholder quando não há logs */}
+          {logs.length === 0 && (
+            <p style={{
+              color: '#555',
+              textAlign: 'center',
+              marginTop: '1rem',
+              fontStyle: 'italic',
+            }}>
+              {loading
+                ? '⏳ Aguardando logs do motor Soberano...'
+                : '💤 Nenhum log ainda. Envie uma mensagem para começar.'
+              }
+            </p>
+          )}
+
+          {/* Renderização das linhas de log */}
+          {logs.map((log, index) => (
+            <div
+              key={index}
+              style={{
+                padding: '0.15rem 0',
+                color: getLogColor(log.level),
+                wordBreak: 'break-word',
+              }}
+            >
+              {/* Timestamp (cinza escuro) */}
+              <span style={{ color: '#666', marginRight: '0.75rem' }}>
+                [{formatTime(log.timestamp)}]
+              </span>
+
+              {/* Nível (abreviado + cor) */}
+              <span style={{
+                display: 'inline-block',
+                width: '3rem',
+                textTransform: 'uppercase',
+                fontWeight: 700,
+                color: getLogColor(log.level),
+                marginRight: '0.5rem',
+              }}>
+                {log.level === 'info'
+                  ? 'INFO'
+                  : log.level === 'warn'
+                  ? 'WARN'
+                  : log.level === 'error'
+                  ? 'ERR '
+                  : 'DBUG'
+                }
+              </span>
+
+              {/* Iteração */}
+              <span style={{ color: '#808080', marginRight: '0.5rem' }}>
+                [{log.iteration}]
+              </span>
+
+              {/* Mensagem principal */}
+              <span>{log.message}</span>
+
+              {/* Nome da ferramenta (quando presente) */}
+              {log.data?.toolName != null && (
+                <span style={{
+                  color: '#569cd6',
+                  marginLeft: '0.5rem',
+                  fontSize: '0.75rem',
+                }}>
+                  → {String(log.data.toolName)}
+                </span>
+              )}
+            </div>
+          ))}
+
+          {/* âncora para auto-scroll */}
+          <div ref={consoleEndRef} />
+        </div>
+      </div>
+
+      {/* ── Input Form (fixo no rodapé) ── */}
+      <form
+        onSubmit={handleSubmit}
+        style={{
+          padding: '20px',
+          display: 'flex',
+          gap: '10px',
+          backgroundColor: '#252526',
+          borderTop: '1px solid #333',
+        }}
+      >
+        <input
+          type="text"
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+          placeholder="Ex: Leia o package.json na pasta ~/Documentos/estudos/AgenteIA/"
+          disabled={loading}
+          style={{
+            flex: 1,
+            padding: '12px',
+            backgroundColor: '#3c3c3c',
+            color: '#fff',
+            border: '1px solid #444',
+            borderRadius: '4px',
+            fontSize: '0.9rem',
+            fontFamily: 'inherit',
+            outline: 'none',
+          }}
+        />
+        <button
+          type="submit"
+          disabled={loading || !prompt.trim()}
+          style={{
+            padding: '10px 25px',
+            backgroundColor: loading ? '#333' : '#007acc',
+            color: loading ? '#666' : '#fff',
+            border: 'none',
+            borderRadius: '4px',
+            cursor: loading || !prompt.trim() ? 'not-allowed' : 'pointer',
+            fontSize: '0.9rem',
+            fontWeight: 700,
+            fontFamily: 'inherit',
+            transition: 'background-color 0.15s',
+          }}
+        >
+          {loading ? '⏳ Processando...' : '▶ Enviar'}
+        </button>
+      </form>
     </div>
   );
 };

@@ -5,6 +5,14 @@ import type { ReActMessage, LogPayload } from '@soberano/core';
 
 const VITE_DEV_SERVER_URL = 'http://localhost:5173';
 
+/**
+ * Diretório raiz do monorepo.
+ * __dirname em dev: packages/shell/electron (compilado para .js)
+ * Subimos 2 níveis para chegar na raiz do monorepo (AgenteIA).
+ */
+const MONOREPO_ROOT = path.resolve(__dirname, '..', '..', '..');
+console.log(`[Init] Monorepo root: ${MONOREPO_ROOT}`);
+
 let appContext: AppContext | null = null;
 
 // ── Persistência de Memória (Histórico Multi-turn) ──
@@ -107,6 +115,7 @@ app.whenReady().then(async () => {
   appContext = new AppContext({
     provider: { type: 'ollama', host: 'localhost', port: 11434 },
     model: 'qwen2.5-coder:3b',
+    baseDir: MONOREPO_ROOT,
   });
 
   console.log('[IPC] AppContext initialized with Ollama provider');
