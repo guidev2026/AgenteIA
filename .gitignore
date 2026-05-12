@@ -4,3 +4,6 @@ dist-electron/
 .soberano/
 *.log
 .DS_Store
+repomix-output.xml
+packages/*/repomix-output.xml
+*.tsbuildinfo

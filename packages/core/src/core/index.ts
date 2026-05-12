@@ -43,7 +43,7 @@ export type { SearchMatch } from './rag/Retriever';
 
 // ReAct Loop + Prompt Builder (Strategy pattern)
 export { ReActLoop } from './rag/ReActLoop';
-export type { ReActMessage, ReActResult } from './rag/ReActLoop';
+export type { ReActMessage, ReActResult, LogPayload, ExecuteOptions } from './rag/ReActLoop';
 // Reflector (self-correction)
 export { Reflector } from './Reflector';
 export type { ReflectionError, ReflectionResult } from './Reflector';
