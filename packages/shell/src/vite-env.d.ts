@@ -17,6 +17,12 @@ export interface SoberanoAPI {
    * Retorna função de cleanup para remover o listener.
    */
   onSoberanoLog: (callback: (payload: LogPayload) => void) => () => void;
+  /**
+   * onOllamaStatus — Registra um listener para o status do motor Ollama.
+   * Recebe 'online' ou 'offline' em tempo real (polling a cada 10s).
+   * Retorna função de cleanup para remover o listener.
+   */
+  onOllamaStatus: (callback: (status: 'online' | 'offline') => void) => () => void;
 }
 
 declare global {

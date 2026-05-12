@@ -1123,6 +1123,47 @@ ReActLoop.emitLog()
 - **Auto-scroll:** `useRef` + `scrollIntoView({ behavior: 'smooth' })`
 - **Cleanup:** remove listener IPC ao desmontar componente
 
+## ✅ Task 2.1 — Health-Check Indicator (Concluída)
+
+**Objetivo:** Implementar um sistema de monitoramento de integridade do motor Ollama, enviando o status em tempo real para o frontend via badge visual.
+
+### Arquivos modificados:
+
+| Arquivo | Mudança |
+|---------|---------|
+| `packages/shell/electron/main.ts` | Função `checkOllamaStatus()` faz ping no endpoint `/api/tags` com timeout de 5s; `setInterval` de 10s envia `ollama:status` para o frontend; primeiro health-check executado imediatamente ao iniciar |
+| `packages/shell/electron/preload.ts` | Método `onOllamaStatus(callback)` exposto na bridge IPC retornando função de cleanup |
+| `packages/shell/src/vite-env.d.ts` | Assinatura `onOllamaStatus` adicionada à interface `SoberanoAPI` |
+| `packages/shell/src/App.tsx` | Estado `isOnline: boolean \| null`; `useEffect` registra listener; badge `⏳` / `🟢` / `🔴` no header |
+
+### Fluxo de dados:
+
+```
+main.ts: setInterval(10s) → checkOllamaStatus()
+  → fetch('http://localhost:11434/api/tags')
+    → 'online' se 200, 'offline' se falha/timeout
+      → mainWebContents.send('ollama:status', status)
+        → preload.ts: ipcRenderer.on('ollama:status')
+          → App.tsx: window.api.onOllamaStatus(status)
+            → setIsOnline(status === 'online')
+              → Badge: 🟢 online | 🔴 offline | ⏳ verificando
+```
+
+### Estados do Badge:
+
+| Estado | Badge | Significado |
+|--------|-------|-------------|
+| `null` (inicial) | `⏳` | Verificando conexão com Ollama... |
+| `true` | `🟢` | Ollama online e respondendo |
+| `false` | `🔴` | Ollama offline — servidor não está rodando |
+
+### Melhoria no System Prompt (Soberania de Diretório):
+
+Adicionado ao `buildSystemPrompt()` o parâmetro `baseDir` com a instrução em português:
+> "Seu diretório base de trabalho é [caminho_absoluto]. Sempre use caminhos relativos a partir deste diretório ou caminhos absolutos completos iniciando em [caminho_absoluto] para todas as operações de sistema de arquivos."
+
+Isso garante que o modelo entenda onde estão os arquivos do monorepo, prevenindo erros de caminho.
+
 ---
 
 - [x] Implementar novos providers (OpenAI, Anthropic, etc.)

@@ -20,6 +20,7 @@ const App: React.FC = () => {
   const [response, setResponse] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(false);
   const [logs, setLogs] = useState<LogPayload[]>([]);
+  const [isOnline, setIsOnline] = useState<boolean | null>(null);
 
   // Ref para auto-scroll do terminal de logs
   const consoleEndRef = useRef<HTMLDivElement>(null);
@@ -43,6 +44,15 @@ const App: React.FC = () => {
     });
 
     // Cleanup ao desmontar: remove o listener IPC
+    return cleanup;
+  }, []);
+
+  // Registra listener de status do Ollama (Task 2.1 — Health-Check Indicator)
+  useEffect(() => {
+    const cleanup = window.api.onOllamaStatus((status: 'online' | 'offline') => {
+      setIsOnline(status === 'online');
+    });
+
     return cleanup;
   }, []);
 
@@ -113,14 +123,37 @@ const App: React.FC = () => {
         textAlign: 'center',
         userSelect: 'none',
       }}>
-        <h1 style={{
-          fontSize: '1.25rem',
-          margin: 0,
-          color: '#4ec9b0',
-          letterSpacing: '0.05em',
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: '0.5rem',
         }}>
-          🛡️ Soberano-Core
-        </h1>
+          <h1 style={{
+            fontSize: '1.25rem',
+            margin: 0,
+            color: '#4ec9b0',
+            letterSpacing: '0.05em',
+          }}>
+            🛡️ Soberano-Core
+          </h1>
+
+          {/* ── Health-Check Badge (Task 2.1) ── */}
+          <span
+            title={isOnline === null
+              ? 'Verificando conexão com Ollama...'
+              : isOnline
+                ? 'Ollama online'
+                : 'Ollama offline'
+            }
+            style={{
+              fontSize: '0.85rem',
+              lineHeight: 1,
+            }}
+          >
+            {isOnline === null ? '⏳' : isOnline ? '🟢' : '🔴'}
+          </span>
+        </div>
         <p style={{
           color: '#555',
           fontSize: '0.7rem',
