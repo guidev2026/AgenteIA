@@ -163,7 +163,7 @@ app.whenReady().then(async () => {
   // mantendo o desacoplamento SOLID.
   appContext = new AppContext({
     provider: { type: 'ollama', host: 'localhost', port: 11434 },
-    model: 'qwen2.5-coder:7b',
+    model: 'qwen2.5-coder:3b',
     baseDir: MONOREPO_ROOT,
   });
 
