@@ -1,0 +1,27 @@
+{
+  "name": "@soberano/shell",
+  "version": "1.0.0",
+  "description": "Soberano-Core Electron Shell — Desktop interface for the AI agent",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k \"vite\" \"tsx electron/dev-runner.ts\"",
+    "build": "tsc -p tsconfig.electron.json && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@soberano/core": "*",
+    "@types/node": "^20.19.40",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@vitejs/plugin-react": "^4.2.0",
+    "concurrently": "^8.2.0",
+    "electron": "^28.0.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3",
+    "vite": "^5.0.0"
+  }
+}

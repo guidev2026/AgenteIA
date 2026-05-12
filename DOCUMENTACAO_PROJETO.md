@@ -5,7 +5,7 @@
 **Soberano-Core** é um **Agente IA modular** construído em **TypeScript/Node.js** que integra um **Core** de utilitários (leitura de arquivos, execução de comandos), **Providers** (conexão com modelos de IA como Ollama) e uma **CLI** para interação via terminal.
 
 - **Nome do pacote:** `soberano-core`
-- **Versão:** `1.0.0`
+- **Versão:** `2.0.0-alpha`
 - **Licença:** MIT
 - **Linguagem:** TypeScript (target ES2020)
 - **Gerenciador de pacotes:** npm
@@ -920,6 +920,105 @@ npx vitest run        # Equivalente
 npx vitest run tests/unit/providers/  # Apenas providers
 npx vitest            # Modo watch (recarrega automático)
 ```
+
+---
+
+## 🚀 Soberano OS (v2.0.0)
+
+### Visão Geral
+
+O **Soberano OS** é a evolução do Soberano-Core para uma arquitetura **Monorepo** multiplataforma. Agora dividido em dois pacotes principais — `packages/core` e `packages/shell` — o projeto expande seu alcance do terminal para o desktop, mantendo os princípios de **zero dependências externas** e **soberania digital**.
+
+### Fase 1: Encapsulamento Desktop ✅
+
+A Fase 1 foi iniciada com sucesso, estabelecendo a base para uma aplicação desktop completa:
+
+| Componente | Tecnologia | Descrição |
+|------------|-----------|-----------|
+| **Monorepo** | NPM Workspaces | Gerenciamento unificado de dependências e scripts entre `core` e `shell` |
+| **Core (IA Engine)** | TypeScript + Vitest | Motor de IA encapsulado como pacote independente com 308 testes unitários |
+| **Shell Desktop** | Electron + Vite + React + TypeScript | Interface gráfica desktop que consome o core via Node.js bindings |
+
+### Estrutura de Pastas (v2.0.0)
+
+```
+AgenteIA/
+├── package.json                   # Monorepo root (NPM Workspaces)
+├── .gitignore                     # Arquivos ignorados pelo Git
+├── DOCUMENTACAO_PROJETO.md        # Esta documentação
+├── packages/
+│   ├── core/                      # Motor de IA (zero dependências externas)
+│   │   ├── package.json           # @soberano/core
+│   │   ├── tsconfig.json          # TypeScript config para core
+│   │   ├── vitest.config.ts       # Configuração do Vitest
+│   │   ├── src/                   # Código-fonte do core
+│   │   │   ├── cli/               # CLI (comandos + estratégias)
+│   │   │   ├── core/              # Core (FileReader, CommandExecutor, RAG, etc.)
+│   │   │   ├── providers/         # Providers (Ollama, etc.)
+│   │   │   └── validation/        # Validação JSON
+│   │   └── tests/                 # Testes unitários e de integração
+│   │       ├── unit/              # 308 testes unitários (Vitest)
+│   │       └── integration/       # Testes de integração
+│   │
+│   └── shell/                     # Desktop Shell (Electron + React)
+│       ├── package.json           # @soberano/shell
+│       ├── index.html             # Entrypoint HTML do Vite
+│       ├── vite.config.ts         # Configuração do Vite
+│       ├── tsconfig.json          # TypeScript config (React)
+│       ├── tsconfig.electron.json # TypeScript config (Electron main process)
+│       ├── electron/              # Processo principal do Electron
+│       │   ├── main.ts            # Main process (BrowserWindow + IPC)
+│       │   ├── preload.ts         # Preload script (contextBridge)
+│       │   └── dev-runner.ts      # Runner para desenvolvimento (concurrently)
+│       └── src/                   # Renderer process (React)
+│           ├── main.tsx           # Entrypoint React (DOM mount)
+│           ├── App.tsx            # Componente principal App
+│           └── vite-env.d.ts      # Declarações de tipo Vite
+```
+
+### Arquitetura do Soberano OS
+
+```
+                         ┌──────────────────────────────────┐
+                         │         Monorepo Root             │
+                         │    (NPM Workspaces)               │
+                         │    scripts: build, dev, test      │
+                         └──────────┬───────────────────────┘
+                                    │
+                    ┌───────────────┴───────────────┐
+                    │                               │
+                    ▼                               ▼
+        ┌──────────────────────┐       ┌──────────────────────────┐
+        │   @soberano/core     │       │    @soberano/shell       │
+        │   (Node.js Library)  │──────▶│  (Electron + React)      │
+        │                      │       │                          │
+        │  - FileReader        │       │  - Electron Main Process │
+        │  - CommandExecutor   │       │  - IPC Bridge            │
+        │  - RAGManager        │       │  - React UI (Vite)       │
+        │  - ReActLoop         │       │  - Preload Security      │
+        │  - ToolRegistry      │       │                          │
+        │  - Providers         │       │  Depende de:             │
+        │  - CLI               │       │  @soberano/core (local)  │
+        └──────────────────────┘       └──────────────────────────┘
+```
+
+### Por que Monorepo?
+
+| Benefício | Descrição |
+|-----------|-----------|
+| **Código compartilhado** | O `shell` importa `@soberano/core` como dependência local via NPM Workspaces — sem necessidade de publicar pacote |
+| **Build unificado** | `npm run build` na raiz compila ambos os pacotes com um único comando |
+| **Testes centralizados** | `npm test` executa os 308 testes do core + futuros testes do shell |
+| **Versionamento atômico** | Um único commit versiona mudanças no core e no shell simultaneamente |
+| **Zero dependências externas no core** | O pacote `@soberano/core` continua sem dependências externas em produção |
+
+### Status da Fase 1
+
+- [x] Setup do Monorepo (NPM Workspaces) com `packages/core` e `packages/shell`
+- [x] Integração Electron + Vite + React + TypeScript no `packages/shell`
+- [x] Core refatorado para pacote independente (`@soberano/core`)
+- [x] 308 testes unitários do core migrados e passando
+- [ ] **Próximo passo:** Implementar IPC Bridge entre Electron e Core
 
 ---
 
