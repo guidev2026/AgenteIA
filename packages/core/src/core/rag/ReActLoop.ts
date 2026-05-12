@@ -53,6 +53,33 @@ export interface StreamOptions {
   onToken: (token: string) => void;
 }
 
+/**
+ * LogPayload — estrutura dos logs emitidos durante a execução do ReActLoop.
+ * Usado para transmitir eventos de raciocínio/ferramentas para o frontend
+ * (via IPC Bridge) ou para logging em tempo real.
+ */
+export interface LogPayload {
+  /** Nível do log (info, warn, error, debug) */
+  level: 'info' | 'warn' | 'error' | 'debug';
+  /** Mensagem descritiva */
+  message: string;
+  /** Número da iteração atual (1-based) */
+  iteration: number;
+  /** Timestamp ISO */
+  timestamp: string;
+  /** Dados adicionais opcionais (toolName, args, resultado parcial, etc.) */
+  data?: Record<string, unknown>;
+}
+
+/** Opções estendidas para execute() */
+export interface ExecuteOptions {
+  jsonMode?: boolean;
+  reflect?: boolean;
+  stream?: StreamOptions;
+  /** Callback para logs em tempo real durante a execução do loop */
+  onLog?: (payload: LogPayload) => void;
+}
+
 export class ReActLoop {
   private provider: IProvider;
   private executor?: CommandExecutor;
@@ -74,6 +101,28 @@ export class ReActLoop {
     this.reflector = reflector;
     this.compressor = compressor;
     this.jsonValidator = new JsonValidator();
+  }
+
+  /**
+   * Helper para emitir logs via callback, se fornecido.
+   * Centraliza a criação do payload LogPayload com timestamp.
+   */
+  private emitLog(
+    onLog: ((payload: LogPayload) => void) | undefined,
+    level: LogPayload['level'],
+    message: string,
+    iteration: number,
+    data?: Record<string, unknown>
+  ): void {
+    if (onLog) {
+      onLog({
+        level,
+        message,
+        iteration,
+        timestamp: new Date().toISOString(),
+        data,
+      });
+    }
   }
 
   /**
@@ -149,12 +198,20 @@ export class ReActLoop {
     systemPrompt: string,
     history: ReActMessage[],
     model: string,
-    streamOpts?: StreamOptions
+    streamOpts?: StreamOptions,
+    onLog?: (payload: LogPayload) => void,
   ): Promise<ReActResult> {
     let accumulatedPrompt = this.buildPrompt(systemPrompt, history);
     let lastToolCall = '';
 
     for (let i = 0; i < MAX_ITERATIONS; i++) {
+      const iterationNum = i + 1;
+
+      // Emite log de início de iteração
+      this.emitLog(onLog, 'info', `Iteração ${iterationNum} de pensamento...`, iterationNum, {
+        mode: 'json',
+      });
+
       const promptForThisIteration =
         i === MAX_ITERATIONS - 1
           ? accumulatedPrompt +
@@ -169,16 +226,18 @@ export class ReActLoop {
         model,
         0.2,
         'json',
-        streamOpts // streaming para todas iterações; sendPrompt decide
+        streamOpts
       );
 
       // Usa JsonValidator para parsear
       const parsed = this.jsonValidator.tryValidate<Record<string, unknown>>(content);
       if (!parsed) {
-        // Se não for JSON, retorna cru como fallback
+        this.emitLog(onLog, 'warn', `Resposta não-JSON na iteração ${iterationNum}`, iterationNum, {
+          snippet: content.substring(0, 200),
+        });
         return {
           finalAnswer: content,
-          iterations: i + 1,
+          iterations: iterationNum,
         };
       }
 
@@ -188,8 +247,17 @@ export class ReActLoop {
         const toolArgs = (parsed.args as Record<string, unknown>) || {};
         const callFingerprint = `${toolName}:${JSON.stringify(toolArgs)}`;
 
+        this.emitLog(onLog, 'info', `🔧 Chamando ferramenta: ${toolName}`, iterationNum, {
+          toolName,
+          args: toolArgs,
+        });
+
         // Detecta chamadas repetidas consecutivas (loop infinito)
         if (callFingerprint === lastToolCall && i < MAX_ITERATIONS - 1) {
+          this.emitLog(onLog, 'warn', `⚠️ Loop detectado: ${toolName} chamado repetidamente`, iterationNum, {
+            toolName,
+            args: toolArgs,
+          });
           accumulatedPrompt +=
             `\n\nATENÇÃO: Você já chamou "${toolName}" com os mesmos ` +
             'argumentos. Use os dados já recebidos e responda com ' +
@@ -203,8 +271,16 @@ export class ReActLoop {
         let toolResult: string;
         try {
           toolResult = await this.toolRegistry.execute(toolName, toolArgs);
+          this.emitLog(onLog, 'info', `✅ Ferramenta ${toolName} executada com sucesso`, iterationNum, {
+            toolName,
+            resultPreview: toolResult.substring(0, 300),
+          });
         } catch (err: unknown) {
           toolResult = err instanceof Error ? err.message : String(err);
+          this.emitLog(onLog, 'error', `❌ Erro na ferramenta ${toolName}: ${toolResult}`, iterationNum, {
+            toolName,
+            error: toolResult,
+          });
         }
 
         // ── Prevenção de Context Overflow ──
@@ -216,12 +292,11 @@ export class ReActLoop {
         const overflowThreshold = Math.floor(contextLimit * 0.8);
 
         if (estimatedNewTotal > overflowThreshold) {
-          // Trunca o toolResult para caber no limite seguro
           const maxToolTokens = Math.max(
             50,
             overflowThreshold - TokenEstimator.estimate(accumulatedPrompt) - 100
           );
-          const truncated = toolResult.slice(0, maxToolTokens * 4); // 4 chars ≈ 1 token
+          const truncated = toolResult.slice(0, maxToolTokens * 4);
           const originalTokens = TokenEstimator.estimate(toolResult);
           toolResult =
             truncated +
@@ -229,6 +304,11 @@ export class ReActLoop {
             `tinha ~${originalTokens} tokens e foi truncado para caber no limite de contexto ` +
             `(~${contextLimit} tokens). Considere usar apenas as informações mais relevantes ` +
             `deste resultado.`;
+
+          this.emitLog(onLog, 'warn', `⚠️ Context overflow prevenido (${originalTokens} → truncado)`, iterationNum, {
+            originalTokens,
+            contextLimit,
+          });
         }
 
         accumulatedPrompt += `\n\nResultado da ferramenta ${toolName}: ${toolResult}`;
@@ -237,20 +317,27 @@ export class ReActLoop {
 
       // final_response → retorna
       if (parsed.final_response && typeof parsed.final_response === 'string') {
+        this.emitLog(onLog, 'info', `✅ Resposta final obtida na iteração ${iterationNum}`, iterationNum, {
+          finalAnswerPreview: (parsed.final_response as string).substring(0, 200),
+        });
         return {
-          finalAnswer: parsed.final_response,
-          iterations: i + 1,
+          finalAnswer: parsed.final_response as string,
+          iterations: iterationNum,
         };
       }
 
       // Formato desconhecido → fallback
+      this.emitLog(onLog, 'warn', `Formato desconhecido na iteração ${iterationNum}`, iterationNum, {
+        contentPreview: content.substring(0, 200),
+      });
       return {
         finalAnswer: content,
-        iterations: i + 1,
+        iterations: iterationNum,
       };
     }
 
     // Loop esgotado
+    this.emitLog(onLog, 'warn', `⚠️ Loop esgotado após ${MAX_ITERATIONS} iterações`, MAX_ITERATIONS);
     return {
       finalAnswer: 'O modelo não conseguiu chegar a uma resposta final após ' +
         `${MAX_ITERATIONS} iterações.`,
@@ -267,7 +354,8 @@ export class ReActLoop {
     systemPrompt: string,
     history: ReActMessage[],
     model: string,
-    streamOpts?: StreamOptions
+    streamOpts?: StreamOptions,
+    onLog?: (payload: LogPayload) => void,
   ): Promise<ReActResult> {
     let iteration = 0;
     let finalAnswer = '';
@@ -275,16 +363,24 @@ export class ReActLoop {
 
     while (iteration < MAX_ITERATIONS) {
       iteration++;
+      const iterationNum = iteration;
+
+      this.emitLog(onLog, 'info', `Iteração ${iterationNum} (modo texto)`, iterationNum, {
+        mode: 'text',
+      });
 
       const content = await this.sendPrompt(
         prompt,
         model,
         0.3,
         undefined,
-        streamOpts // streaming para todas iterações; sendPrompt decide
+        streamOpts
       );
 
       if (content.includes('FINAL_ANSWER') || content.includes('FINAL ANSWER')) {
+        this.emitLog(onLog, 'info', `✅ Resposta final (modo texto) na iteração ${iterationNum}`, iterationNum, {
+          contentPreview: content.substring(0, 200),
+        });
         finalAnswer = content;
         break;
       }
@@ -297,6 +393,11 @@ export class ReActLoop {
           const cmd = parts[0];
           const args = parts.slice(1);
 
+          this.emitLog(onLog, 'info', `🔧 Executando comando: ${cmd}`, iterationNum, {
+            command: cmd,
+            args,
+          });
+
           try {
             const result = await this.executor.execute(cmd, args, { timeout: 30000 });
             const observation =
@@ -304,9 +405,18 @@ export class ReActLoop {
               (result.stdout ? `STDOUT:\n${result.stdout}\n` : '') +
               (result.stderr ? `STDERR:\n${result.stderr}\n` : '');
             prompt += `\n\n[ASSISTANT]: ${content}\n[SYSTEM]: ${observation}`;
+
+            this.emitLog(onLog, 'info', `✅ Comando executado (exit code ${result.exitCode})`, iterationNum, {
+              command: cmd,
+              exitCode: result.exitCode,
+            });
           } catch (err) {
             const errMsg = err instanceof Error ? err.message : String(err);
             prompt += `\n\n[ASSISTANT]: ${content}\n[SYSTEM]: OBSERVATION: Error executing action: ${errMsg}`;
+            this.emitLog(onLog, 'error', `❌ Erro executando comando: ${errMsg}`, iterationNum, {
+              command: cmd,
+              error: errMsg,
+            });
           }
           continue;
         }
@@ -341,10 +451,6 @@ export class ReActLoop {
     model: string,
     reflectFlag: boolean
   ): Promise<ReActResult> {
-    // Só aplica reflexão se:
-    // 1. A flag --reflect está ativa
-    // 2. O Reflector foi injetado
-    // 3. Há uma resposta real (não vazia)
     if (!reflectFlag || !this.reflector || !result.finalAnswer) {
       return result;
     }
@@ -365,19 +471,28 @@ export class ReActLoop {
    * @param systemPrompt Prompt de sistema
    * @param history Histórico de mensagens
    * @param model Modelo (default: tinyllama:1b)
-   * @param options.jsonMode Se true, usa JSON mode (tool_call/final_response)
-   * @param options.reflect Se true, aplica Reflector pós-resposta (self-correction)
-   * @param options.stream Opções de streaming (se undefined, usa chat() normal)
+   * @param options Opções de execução:
+   *   - jsonMode: Se true, usa JSON mode (tool_call/final_response)
+   *   - reflect: Se true, aplica Reflector pós-resposta (self-correction)
+   *   - stream: Opções de streaming (se undefined, usa chat() normal)
+   *   - onLog: Callback opcional chamado a cada evento de log durante a execução
    * @returns Resultado com resposta final e número de iterações
    */
   async execute(
     systemPrompt: string,
     history: ReActMessage[],
     model?: string,
-    options?: { jsonMode?: boolean; reflect?: boolean; stream?: StreamOptions }
+    options?: ExecuteOptions
   ): Promise<ReActResult> {
     const resolvedModel = model ?? 'tinyllama:1b';
     const reflectFlag = options?.reflect === true;
+    const onLog = options?.onLog;
+
+    this.emitLog(onLog, 'info', '🚀 Iniciando execução do ReActLoop', 0, {
+      mode: options?.jsonMode ? 'json' : 'text',
+      model: resolvedModel,
+      historySize: history.length,
+    });
 
     // ── Compressão de contexto (pré-buildPrompt) ──
     let currentHistory = history;
@@ -392,9 +507,13 @@ export class ReActLoop {
       const need = assessCompressionNeed(estimatedTokens, contextLimit);
 
       if (need !== CompressionTrigger.NONE) {
+        this.emitLog(onLog, 'info', `Comprimindo contexto (trigger: ${need})`, 0, {
+          estimatedTokens,
+          contextLimit,
+          trigger: need,
+        });
+
         const compressed = await this.compressor.compress(history, resolvedModel, systemPrompt);
-        // Só adiciona workingMemory ao histórico se tiver conteúdo real
-        // Isso evita mensagens [SYSTEM]: vazias no SessionStore (sessões fantasmas)
         if (compressed.workingMemory && compressed.workingMemory.trim().length > 0) {
           const workingMemoryMsg: ReActMessage = {
             role: 'system',
@@ -403,6 +522,12 @@ export class ReActLoop {
           currentHistory = [workingMemoryMsg, ...compressed.keptMessages];
           wasCompressed = true;
           compressionRatio = compressed.compressionRatio;
+
+          this.emitLog(onLog, 'info', `Contexto comprimido (ratio: ${(compressed.compressionRatio * 100).toFixed(1)}%)`, 0, {
+            compressionRatio: compressed.compressionRatio,
+            keptMessages: compressed.keptMessages.length,
+          });
+
           console.error(
             `[ReActLoop] Context compressed at ${need} trigger. ` +
             `Ratio: ${(compressed.compressionRatio * 100).toFixed(1)}%`,
@@ -412,6 +537,9 @@ export class ReActLoop {
             'Erro: Falha ao comprimir contexto. O histórico mais antigo foi truncado para economizar memória.'
           );
           currentHistory = compressed.keptMessages;
+          this.emitLog(onLog, 'warn', 'Falha na compressão: histórico truncado', 0, {
+            keptMessages: compressed.keptMessages.length,
+          });
         }
       }
     }
@@ -419,13 +547,30 @@ export class ReActLoop {
     let result: ReActResult;
 
     if (options?.jsonMode && this.toolRegistry) {
-      result = await this.executeJsonMode(systemPrompt, currentHistory, resolvedModel, options?.stream);
+      result = await this.executeJsonMode(
+        systemPrompt,
+        currentHistory,
+        resolvedModel,
+        options?.stream,
+        onLog,
+      );
     } else {
-      result = await this.executeTextMode(systemPrompt, currentHistory, resolvedModel, options?.stream);
+      result = await this.executeTextMode(
+        systemPrompt,
+        currentHistory,
+        resolvedModel,
+        options?.stream,
+        onLog,
+      );
     }
 
     // Aplica reflexão após a resposta final (ambos os modos)
     result = await this.applyReflection(result, resolvedModel, reflectFlag);
+
+    this.emitLog(onLog, 'info', `🏁 Execução concluída em ${result.iterations} iteração(ões)`, result.iterations, {
+      finalAnswerLength: result.finalAnswer.length,
+      hasCorrection: !!result.correctionStatus,
+    });
 
     return {
       ...result,

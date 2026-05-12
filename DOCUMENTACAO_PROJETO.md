@@ -1050,7 +1050,79 @@ AgenteIA/
 - [já implementado] ~~Adicionar camada de auto-correção (Reflector + --reflect)~~
 - [já implementado] ~~Adicionar suporte a sessões/conversa com histórico (multi-turn)~~
 - [já implementado] ~~Adicionar GraphRAG — busca híbrida vetorial + grafo de conhecimento~~
-- Implementar novos providers (OpenAI, Anthropic, etc.)
+## ✅ Task 1 — IPC Bridge para Logs (Concluída)
+
+### 1.1 Refatoração do IPC Bridge
+
+**Objetivo:** Permitir que o `ReActLoop` envie logs em tempo real para o frontend Electron enquanto executa.
+
+#### Arquivos modificados:
+
+| Arquivo | Mudança |
+|---------|---------|
+| `packages/core/src/core/rag/ReActLoop.ts` | Interface `LogPayload`, `ExecuteOptions.onLog`, método `emitLog()` chamado em cada iteração/tool call |
+| `packages/core/src/core/index.ts` | Export `LogPayload` e `ExecuteOptions` no barrel |
+| `packages/shell/electron/main.ts` | Callback `onLog` que faz `webContents.send('soberano:log', payload)` |
+| `packages/shell/electron/preload.ts` | Método `onSoberanoLog(callback)` exposto via `contextBridge` |
+| `packages/shell/src/vite-env.d.ts` | Tipos `LogPayload` e `SoberanoAPI.onSoberanoLog` |
+| `packages/shell/src/App.tsx` | `useState<LogPayload[]>`, `useEffect` com listener, renderização com auto-scroll |
+
+#### Fluxo de dados:
+
+```
+ReActLoop.emitLog()
+  → onLog callback
+    → main.ts: webContents.send('soberano:log', payload)
+      → preload.ts: ipcRenderer.on('soberano:log')
+        → App.tsx: window.api.onSoberanoLog(payload)
+          → setLogs([...prev, payload]) + auto-scroll
+```
+
+#### Eventos emitidos pelo ReActLoop:
+- `🚀 Iniciando execução do ReActLoop` (nível: info)
+- `Iteração N de pensamento...` (nível: info)
+- `🔧 Chamando ferramenta: <name>` (nível: info) com `data.toolName`
+- `✅ Ferramenta <name> executada com sucesso` (nível: info)
+- `❌ Erro na ferramenta <name>: <msg>` (nível: error)
+- `⚠️ Loop detectado: <name>` (nível: warn)
+- `⚠️ Context overflow prevenido` (nível: warn)
+- `✅ Resposta final obtida na iteração N` (nível: info)
+- `🏁 Execução concluída em N iteração(ões)` (nível: info)
+
+### 1.2.1 Soberano Console (UI de Logs)
+
+**Objetivo:** Área de logs persistente no rodapé do App.tsx com fundo preto estilo terminal.
+
+#### Layout:
+```
+┌───────────────────────────────────┐
+│  🛡️ Soberano-Core (header)       │
+├───────────────────────────────────┤
+│  [input "Digite sua mensagem..."] │
+│  [▶ Enviar]                       │
+│  📦 Resposta Final (border verde) │
+├───────────────────────────────────┤
+│  [12:34:56.789] INFO  [1] 🚀      │
+│  [12:34:57.012] INFO  [2] 🔧 → toolName │
+│  [12:34:57.345] WARN  [2] ⚠️      │
+│  [12:34:58.100] ERR   [2] ❌      │  ← auto-scroll
+└───────────────────────────────────┘
+```
+
+#### Especificações técnicas:
+- **Fundo:** `#1e1e1e` (VS Code terminal dark)
+- **INFO:** `#4ec9b0` (verde)
+- **WARN:** `#dcdcaa` (amarelo)
+- **ERROR:** `#f44747` (vermelho)
+- **DEBUG:** `#808080` (cinza)
+- **Tool name:** `#569cd6` (azul, quando `data.toolName` presente)
+- **Timestamp:** `HH:MM:SS.mmm` em cinza escuro `#555`
+- **Auto-scroll:** `useRef` + `scrollIntoView({ behavior: 'smooth' })`
+- **Cleanup:** remove listener IPC ao desmontar componente
+
+---
+
+- [x] Implementar novos providers (OpenAI, Anthropic, etc.)
 - Expandir ToolRegistry com mais ferramentas (writeFile, searchFiles, etc.)
 - Melhorar chunking com overlap adaptativo por estrutura (AST-aware)
 - Adicionar reranking multi-stage para melhorar precisão da busca
